@@ -7,7 +7,7 @@ from pathlib import Path
 
 from desloppify.app.commands.helpers.query import write_query
 from . import runtime as review_runtime_mod
-from desloppify.core._internal.coercions import coerce_positive_int
+from desloppify.core.coercions_api import coerce_positive_int
 from desloppify.intelligence import narrative as narrative_mod
 from desloppify.intelligence import review as review_mod
 from desloppify.core.output_api import colorize
@@ -100,6 +100,14 @@ def do_prepare(
             )
         sys.exit(1)
     write_query(data)
+    _print_prepare_summary(data, next_command=next_command, retrospective=retrospective)
+
+
+def _print_prepare_summary(
+    data: dict, *, next_command: str, retrospective: bool,
+) -> None:
+    """Print the prepare summary to the terminal."""
+    total = data.get("total_files", 0)
     batches = data.get("investigation_batches", [])
     print(colorize(f"\n  Holistic review prepared: {total} files in codebase", "bold"))
     if retrospective:

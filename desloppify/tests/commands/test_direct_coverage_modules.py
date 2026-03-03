@@ -100,8 +100,6 @@ def test_smoke_planning():
         plan_select.get_next_items,
         plan_select.get_next_item,
     )
-    assert isinstance(plan_common.TIER_LABELS, dict)
-    assert 1 in plan_common.TIER_LABELS
 
 
 def test_smoke_commands():
@@ -313,10 +311,91 @@ def test_serialize_item_minimal():
     result = next_output.serialize_item(item)
     assert result["id"] == "smells::foo.py::1"
     assert result["kind"] == "finding"
-    assert result["tier"] == 2
+    assert result["confidence"] == "high"
     assert result["detector"] == "smells"
     assert result["file"] == "foo.py"
     assert "explain" not in result
+    # Non-workflow items omit blocked_by/is_blocked
+    assert "blocked_by" not in result
+    assert "is_blocked" not in result
+
+
+def test_serialize_item_includes_blocked_by_for_workflow_stage():
+    """serialize_item includes blocked_by and is_blocked for workflow_stage items."""
+    item = {
+        "id": "triage::reflect",
+        "kind": "workflow_stage",
+        "confidence": "high",
+        "detector": "triage",
+        "file": ".",
+        "summary": "Planning: reflect",
+        "status": "open",
+        "blocked_by": ["triage::observe"],
+        "is_blocked": True,
+    }
+    result = next_output.serialize_item(item)
+    assert result["blocked_by"] == ["triage::observe"]
+    assert result["is_blocked"] is True
+
+
+def test_serialize_item_omits_blocked_by_when_empty():
+    """serialize_item omits blocked_by/is_blocked when not blocked."""
+    item = {
+        "id": "triage::observe",
+        "kind": "workflow_stage",
+        "confidence": "high",
+        "detector": "triage",
+        "file": ".",
+        "summary": "Planning: observe",
+        "status": "open",
+        "blocked_by": [],
+        "is_blocked": False,
+    }
+    result = next_output.serialize_item(item)
+    assert "blocked_by" not in result
+    assert "is_blocked" not in result
+
+
+def test_serialize_cluster_item_caps_member_payload():
+    """Cluster serialization should cap nested members and strip heavy metadata."""
+    sibling_ids = [f"security::src/f{i}.py::B101::{i}" for i in range(80)]
+    members = [
+        {
+            "id": f"security::src/f{i}.py::B101::{i}",
+            "kind": "finding",
+            "confidence": "high",
+            "detector": "security",
+            "file": f"src/f{i}.py",
+            "summary": "Security finding",
+            "status": "open",
+            "primary_command": "desloppify plan done ...",
+            "plan_cluster": {
+                "name": "auto/security",
+                "sibling_ids": sibling_ids,
+            },
+        }
+        for i in range(80)
+    ]
+    cluster = {
+        "id": "auto/security",
+        "kind": "cluster",
+        "action_type": "refactor",
+        "summary": "Fix security findings",
+        "member_count": len(members),
+        "members": members,
+        "cluster_name": "auto/security",
+        "cluster_auto": True,
+        "detector": "security",
+        "primary_command": "desloppify next --cluster auto/security --count 10",
+    }
+
+    result = next_output.serialize_item(cluster)
+    assert result["kind"] == "cluster"
+    assert result["member_count"] == 80
+    assert len(result["members"]) == 25
+    assert result["members_truncated"] is True
+    assert result["members_sample_limit"] == 25
+    assert "plan_cluster" not in result["members"][0]
 
 
 def test_build_query_payload_structure():

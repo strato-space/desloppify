@@ -14,8 +14,8 @@ from typing import Any
 from desloppify.app.commands.helpers.query import write_query
 from . import runner_helpers as runner_helpers_mod
 from .runtime import setup_lang_concrete
-from desloppify.core._internal.coercions import coerce_positive_int
-from desloppify.core._internal.text_utils import get_project_root
+from desloppify.core.coercions_api import coerce_positive_int
+from desloppify.core.text_api import get_project_root
 from desloppify.core.discovery_api import safe_write_text
 from desloppify.intelligence import narrative as narrative_mod
 from desloppify.intelligence import review as review_mod

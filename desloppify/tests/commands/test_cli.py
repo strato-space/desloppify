@@ -144,13 +144,7 @@ class TestCreateParser:
     def test_next_command(self, parser):
         args = parser.parse_args(["next"])
         assert args.command == "next"
-        assert args.tier is None
         assert args.count == 1
-
-    def test_next_with_tier_and_count(self, parser):
-        args = parser.parse_args(["next", "--tier", "2", "--count", "5"])
-        assert args.tier == 2
-        assert args.count == 5
 
     def test_next_with_scope_status_group_and_format(self, parser):
         args = parser.parse_args(
@@ -170,14 +164,6 @@ class TestCreateParser:
         assert args.status == "all"
         assert args.group == "file"
         assert args.format == "md"
-
-    def test_next_with_explain_and_no_tier_fallback(self, parser):
-        args = parser.parse_args(
-            ["next", "--tier", "4", "--explain", "--no-tier-fallback"]
-        )
-        assert args.tier == 4
-        assert args.explain is True
-        assert args.no_tier_fallback is True
 
     def test_plan_done_command(self, parser):
         args = parser.parse_args(["plan", "done", "id1", "id2"])
@@ -233,6 +219,15 @@ class TestCreateParser:
     def test_plan_command(self, parser):
         args = parser.parse_args(["plan"])
         assert args.command == "plan"
+
+    def test_plan_triage_parses_flags(self, parser):
+        args = parser.parse_args(
+            ["plan", "triage", "--stage", "observe", "--report", "analysis"]
+        )
+        assert args.command == "plan"
+        assert args.plan_action == "triage"
+        assert args.stage == "observe"
+        assert args.report == "analysis"
 
     def test_plan_with_output(self, parser):
         args = parser.parse_args(["plan", "--output", "plan.md"])

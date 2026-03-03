@@ -6,6 +6,7 @@ from desloppify.engine._plan.auto_cluster import (
     auto_cluster_findings,
     _cluster_name_from_key,
     _grouping_key,
+    _repair_ghost_cluster_refs,
 )
 from desloppify.engine._plan.operations import (
     create_cluster,
@@ -269,11 +270,11 @@ def test_collapse_clusters_replaces_members():
     }
 
     items = [
-        {"id": "u1", "kind": "finding", "effective_tier": 1, "tier": 1,
+        {"id": "u1", "kind": "finding", "tier": 1,
          "detector": "unused", "confidence": "high", "detail": {}},
-        {"id": "u2", "kind": "finding", "effective_tier": 1, "tier": 1,
+        {"id": "u2", "kind": "finding", "tier": 1,
          "detector": "unused", "confidence": "high", "detail": {}},
-        {"id": "other", "kind": "finding", "effective_tier": 2, "tier": 2,
+        {"id": "other", "kind": "finding", "tier": 2,
          "detector": "structural", "confidence": "medium", "detail": {}},
     ]
 
@@ -300,7 +301,7 @@ def test_collapse_clusters_skips_manual():
     }
 
     items = [
-        {"id": "u1", "kind": "finding", "effective_tier": 1, "tier": 1,
+        {"id": "u1", "kind": "finding", "tier": 1,
          "detector": "unused", "confidence": "high", "detail": {}},
     ]
 
@@ -315,7 +316,7 @@ def test_cluster_sort_key_before_findings():
         "member_count": 5, "id": "auto/unused",
     }
     finding_item = {
-        "kind": "finding", "effective_tier": 1, "tier": 1,
+        "kind": "finding", "tier": 1,
         "confidence": "high", "detector": "unused", "detail": {},
         "id": "some-finding",
     }
@@ -473,9 +474,9 @@ def test_collapse_fallback_action():
     }
 
     items = [
-        {"id": "t1", "kind": "finding", "effective_tier": 1, "tier": 1,
+        {"id": "t1", "kind": "finding", "tier": 1,
          "detector": "test", "confidence": "high", "detail": {}},
-        {"id": "t2", "kind": "finding", "effective_tier": 1, "tier": 1,
+        {"id": "t2", "kind": "finding", "tier": 1,
          "detector": "test", "confidence": "high", "detail": {}},
     ]
 
@@ -663,3 +664,241 @@ def test_stale_and_unscored_separate_clusters():
     initial_set = set(initial["finding_ids"])
     stale_set = set(stale_cluster["finding_ids"])
     assert initial_set.isdisjoint(stale_set)
+
+
+# ---------------------------------------------------------------------------
+# _repair_ghost_cluster_refs
+# ---------------------------------------------------------------------------
+
+def test_repair_ghost_cluster_refs():
+    """Overrides pointing to non-existent clusters should be cleared."""
+    plan = empty_plan()
+    ensure_plan_defaults(plan)
+
+    # Create an override pointing to a cluster that doesn't exist
+    plan["overrides"]["a"] = {
+        "finding_id": "a",
+        "cluster": "deleted-cluster",
+        "created_at": "2025-01-01T00:00:00+00:00",
+    }
+    # Create an override pointing to an existing cluster
+    plan["clusters"]["real-cluster"] = {
+        "name": "real-cluster",
+        "finding_ids": ["b"],
+        "auto": False,
+        "cluster_key": "",
+        "action": None,
+        "user_modified": False,
+    }
+    plan["overrides"]["b"] = {
+        "finding_id": "b",
+        "cluster": "real-cluster",
+        "created_at": "2025-01-01T00:00:00+00:00",
+    }
+
+    from desloppify.engine._state.schema import utc_now
+    repaired = _repair_ghost_cluster_refs(plan, utc_now())
+
+    assert repaired == 1
+    assert plan["overrides"]["a"]["cluster"] is None
+    assert plan["overrides"]["b"]["cluster"] == "real-cluster"
+
+
+def test_repair_ghost_cluster_refs_no_ghosts():
+    """No repairs when all cluster refs are valid."""
+    plan = empty_plan()
+    ensure_plan_defaults(plan)
+
+    plan["clusters"]["my-cluster"] = {
+        "name": "my-cluster",
+        "finding_ids": ["a"],
+        "auto": False,
+        "cluster_key": "",
+        "action": None,
+        "user_modified": False,
+    }
+    plan["overrides"]["a"] = {
+        "finding_id": "a",
+        "cluster": "my-cluster",
+        "created_at": "2025-01-01T00:00:00+00:00",
+    }
+
+    from desloppify.engine._state.schema import utc_now
+    repaired = _repair_ghost_cluster_refs(plan, utc_now())
+    assert repaired == 0
+
+
+def test_auto_cluster_runs_repair():
+    """auto_cluster_findings should repair ghost refs as part of its run."""
+    plan = empty_plan()
+    ensure_plan_defaults(plan)
+
+    # Add a ghost override
+    plan["overrides"]["ghost"] = {
+        "finding_id": "ghost",
+        "cluster": "nonexistent",
+        "created_at": "2025-01-01T00:00:00+00:00",
+    }
+
+    state = _state_with()  # empty state
+    changes = auto_cluster_findings(plan, state)
+
+    # The ghost ref should have been repaired
+    assert plan["overrides"]["ghost"]["cluster"] is None
+    assert changes >= 1
+
+
+# ---------------------------------------------------------------------------
+# Under-target regression tests (#186)
+# ---------------------------------------------------------------------------
+
+def _under_target_state(*dim_keys: str, score: float = 70.0) -> dict:
+    """Build a state with scored, current (NOT stale), below-target dimensions.
+
+    These dimensions have a real score, no placeholder flag, and no
+    needs_review_refresh — they are simply below the target threshold.
+    """
+    dim_scores: dict = {}
+    assessments: dict = {}
+    for dim_key in dim_keys:
+        dim_scores[dim_key] = {
+            "score": score,
+            "strict": score,
+            "checks": 1,
+            "issues": 0,
+            "detectors": {
+                "subjective_assessment": {
+                    "dimension_key": dim_key,
+                    "placeholder": False,
+                }
+            },
+        }
+        assessments[dim_key] = {
+            "score": score,
+            # No placeholder, no needs_review_refresh → current but below target
+        }
+    return {
+        "findings": {},
+        "scan_count": 5,
+        "dimension_scores": dim_scores,
+        "subjective_assessments": assessments,
+    }
+
+
+def test_stale_cluster_uses_actual_stale_ids():
+    """Under-target (not stale) IDs must NOT appear in auto/stale-review."""
+    plan = empty_plan()
+    plan["queue_order"] = [
+        "subjective::design_coherence",    # under-target (current, below target)
+        "subjective::error_consistency",   # under-target
+        "subjective::convention_drift",    # actually stale
+        "subjective::naming_quality",      # actually stale
+    ]
+
+    # Build mixed state: two under-target + two stale
+    ut = _under_target_state("design_coherence", "error_consistency", score=70.0)
+    stale = _stale_state("convention_drift", "naming_quality", score=50.0)
+    state = {
+        "findings": {},
+        "scan_count": 5,
+        "dimension_scores": {
+            **ut["dimension_scores"],
+            **stale["dimension_scores"],
+        },
+        "subjective_assessments": {
+            **ut["subjective_assessments"],
+            **stale["subjective_assessments"],
+        },
+    }
+
+    auto_cluster_findings(plan, state)
+
+    # Stale cluster should only contain the actually-stale dimensions
+    assert "auto/stale-review" in plan["clusters"]
+    stale_cluster = plan["clusters"]["auto/stale-review"]
+    stale_members = set(stale_cluster["finding_ids"])
+    assert stale_members == {
+        "subjective::convention_drift",
+        "subjective::naming_quality",
+    }
+    # Under-target IDs must NOT be in the stale cluster
+    assert "subjective::design_coherence" not in stale_members
+    assert "subjective::error_consistency" not in stale_members
+
+
+def test_under_target_evicted_when_objective_backlog_returns():
+    """Under-target IDs must not stay in queue when objective findings exist."""
+    plan = empty_plan()
+    ut = _under_target_state("design_coherence", "error_consistency", score=70.0)
+
+    # Step 1: no objective items → under-target IDs injected
+    state_no_obj = {**ut, "findings": {}}
+    auto_cluster_findings(plan, state_no_obj)
+
+    order = plan["queue_order"]
+    assert "subjective::design_coherence" in order
+    assert "subjective::error_consistency" in order
+
+    # Step 2: objective findings reappear
+    state_with_obj = {
+        **ut,
+        "findings": {
+            "u1": _finding("u1", "unused"),
+            "u2": _finding("u2", "unused"),
+        },
+    }
+    auto_cluster_findings(plan, state_with_obj)
+
+    order = plan["queue_order"]
+    # Under-target IDs should have been evicted
+    assert "subjective::design_coherence" not in order
+    assert "subjective::error_consistency" not in order
+    # Objective findings should be present (via queue_order from auto-cluster)
+    # The queue head should not be a subjective under-target item
+    subjective_ut = [
+        fid for fid in order
+        if fid.startswith("subjective::") and fid in {
+            "subjective::design_coherence",
+            "subjective::error_consistency",
+        }
+    ]
+    assert subjective_ut == []
+
+
+def test_under_target_lifecycle_inject_then_evict():
+    """Full lifecycle: inject under-target when no objective, evict when objective returns."""
+    plan = empty_plan()
+    ut = _under_target_state("design_coherence", "error_consistency", score=70.0)
+
+    # Phase 1: no objective items — under-target injected
+    state_empty = {**ut, "findings": {}}
+    auto_cluster_findings(plan, state_empty)
+
+    order = plan["queue_order"]
+    assert "subjective::design_coherence" in order
+    assert "subjective::error_consistency" in order
+    # Under-target cluster should exist
+    assert "auto/under-target-review" in plan["clusters"]
+
+    # Phase 2: objective findings appear — under-target evicted from queue
+    state_obj = {
+        **ut,
+        "findings": {
+            "u1": _finding("u1", "unused"),
+            "u2": _finding("u2", "unused"),
+        },
+    }
+    changes = auto_cluster_findings(plan, state_obj)
+    assert changes >= 1
+
+    order = plan["queue_order"]
+    assert "subjective::design_coherence" not in order
+    assert "subjective::error_consistency" not in order
+
+    # Phase 3: objective resolved again — under-target re-injected
+    state_empty2 = {**ut, "findings": {}}
+    auto_cluster_findings(plan, state_empty2)
+
+    order = plan["queue_order"]
+    assert "subjective::design_coherence" in order
+    assert "subjective::error_consistency" in order

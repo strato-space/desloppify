@@ -17,7 +17,25 @@ from desloppify.engine._plan.schema import PlanModel, ensure_plan_defaults
 from desloppify.engine._state.schema import StateModel
 
 SUBJECTIVE_PREFIX = "subjective::"
-SYNTHESIS_ID = "synthesis::pending"
+TRIAGE_ID = "triage::pending"  # deprecated, kept for migration
+
+TRIAGE_PREFIX = "triage::"
+TRIAGE_STAGE_IDS = (
+    "triage::observe",
+    "triage::reflect",
+    "triage::organize",
+    "triage::commit",
+)
+TRIAGE_IDS = set(TRIAGE_STAGE_IDS)
+WORKFLOW_CREATE_PLAN_ID = "workflow::create-plan"
+WORKFLOW_PREFIX = "workflow::"
+SYNTHETIC_PREFIXES = ("triage::", "workflow::", "subjective::")
+
+# Detectors whose findings are NOT objective mechanical work.
+# Used to decide when the objective backlog is drained.
+NON_OBJECTIVE_DETECTORS: frozenset[str] = frozenset({
+    "review", "concerns", "subjective_review", "subjective_assessment",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -73,28 +91,109 @@ def _current_stale_ids(state: StateModel) -> set[str]:
     return stale
 
 
-def _current_unscored_ids(state: StateModel) -> set[str]:
+def current_unscored_ids(state: StateModel) -> set[str]:
     """Return the set of ``subjective::<slug>`` IDs that are currently unscored (placeholder).
 
-    Checks ``subjective_assessments`` directly because
-    ``scorecard_subjective_entries`` filters out placeholder dimensions
-    (they are hidden from the scorecard display).
+    Checks ``subjective_assessments`` first; when that dict is empty
+    (common before any reviews have been run), falls through to
+    ``dimension_scores`` which carries placeholder metadata from scan.
     """
     from desloppify.engine._work_queue.helpers import slugify
 
+    # Primary source: subjective_assessments with placeholder=True
     assessments = state.get("subjective_assessments")
-    if not isinstance(assessments, dict) or not assessments:
+    if isinstance(assessments, dict) and assessments:
+        unscored: set[str] = set()
+        for dim_key, payload in assessments.items():
+            if not isinstance(payload, dict):
+                continue
+            if not payload.get("placeholder"):
+                continue
+            if dim_key:
+                unscored.add(f"{SUBJECTIVE_PREFIX}{slugify(dim_key)}")
+        return unscored
+
+    # Fallback: check dimension_scores directly for placeholder subjective
+    # dimensions.  This handles the common case where subjective_assessments
+    # hasn't been populated yet but dimension_scores already has placeholder
+    # entries from scan.  We can't use scorecard_subjective_entries() here
+    # because the scorecard pipeline intentionally hides placeholders.
+    dim_scores = state.get("dimension_scores", {}) or {}
+    if not dim_scores:
         return set()
 
-    unscored: set[str] = set()
-    for dim_key, payload in assessments.items():
-        if not isinstance(payload, dict):
+    unscored = set()
+    for _name, data in dim_scores.items():
+        if not isinstance(data, dict):
             continue
-        if not payload.get("placeholder"):
+        detectors = data.get("detectors", {})
+        meta = detectors.get("subjective_assessment")
+        if not isinstance(meta, dict):
             continue
+        if not meta.get("placeholder"):
+            continue
+        dim_key = meta.get("dimension_key", "")
         if dim_key:
             unscored.add(f"{SUBJECTIVE_PREFIX}{slugify(dim_key)}")
     return unscored
+
+
+def current_under_target_ids(
+    state: StateModel,
+    *,
+    target_strict: float = 95.0,
+) -> set[str]:
+    """Return ``subjective::<slug>`` IDs that are under target but not stale or unscored.
+
+    These are dimensions whose assessment is still current (not needing refresh)
+    but whose score hasn't reached the target yet.
+    """
+    from desloppify.engine._work_queue.helpers import slugify
+    from desloppify.engine.planning.scorecard_projection import (
+        scorecard_subjective_entries,
+    )
+
+    dim_scores = state.get("dimension_scores", {}) or {}
+    if not dim_scores:
+        return set()
+
+    stale_ids = _current_stale_ids(state)
+    unscored_ids = current_unscored_ids(state)
+
+    under_target: set[str] = set()
+    for entry in scorecard_subjective_entries(state, dim_scores=dim_scores):
+        if entry.get("placeholder") or entry.get("stale"):
+            continue
+        strict_val = float(entry.get("strict", entry.get("score", 100.0)))
+        if strict_val >= target_strict:
+            continue
+        dim_key = entry.get("dimension_key", "")
+        if not dim_key:
+            continue
+        fid = f"{SUBJECTIVE_PREFIX}{slugify(dim_key)}"
+        if fid not in stale_ids and fid not in unscored_ids:
+            under_target.add(fid)
+    return under_target
+
+
+# ---------------------------------------------------------------------------
+# Promoted-aware insertion helper
+# ---------------------------------------------------------------------------
+
+def _after_promoted(order: list[str], plan: PlanModel) -> int:
+    """Return the insertion index just after the last promoted item in *order*.
+
+    When no promoted items are present (or none are in *order*), returns 0
+    so callers fall back to existing front-of-queue behavior.
+    """
+    promoted = set(plan.get("promoted_ids", []))
+    if not promoted:
+        return 0
+    last_idx = -1
+    for i, fid in enumerate(order):
+        if fid in promoted:
+            last_idx = i
+    return last_idx + 1 if last_idx >= 0 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +214,7 @@ def sync_unscored_dimensions(
     """
     ensure_plan_defaults(plan)
     result = UnscoredDimensionSyncResult()
-    unscored_ids = _current_unscored_ids(state)
+    unscored_ids = current_unscored_ids(state)
     stale_ids = _current_stale_ids(state)
     order: list[str] = plan["queue_order"]
 
@@ -131,11 +230,12 @@ def sync_unscored_dimensions(
         order.remove(fid)
         result.pruned.append(fid)
 
-    # --- Inject: prepend unscored IDs to front ----------------------------
+    # --- Inject: prepend unscored IDs after any promoted items -------------
     existing = set(order)
+    insert_at = _after_promoted(order, plan)
     for uid in reversed(sorted(unscored_ids)):
         if uid not in existing:
-            order.insert(0, uid)
+            order.insert(insert_at, uid)
             result.injected.append(uid)
 
     return result
@@ -160,7 +260,7 @@ def sync_stale_dimensions(
     ensure_plan_defaults(plan)
     result = StaleDimensionSyncResult()
     stale_ids = _current_stale_ids(state)
-    unscored_ids = _current_unscored_ids(state)
+    unscored_ids = current_unscored_ids(state)
     order: list[str] = plan["queue_order"]
 
     # --- Cleanup: prune resolved subjective IDs --------------------------
@@ -176,7 +276,12 @@ def sync_stale_dimensions(
         result.pruned.append(fid)
 
     # --- Inject: populate when no objective items remain -----------------
-    has_real_items = any(fid for fid in order if not fid.startswith(SUBJECTIVE_PREFIX))
+    has_real_items = any(
+        f.get("status") == "open"
+        and f.get("detector") not in NON_OBJECTIVE_DETECTORS
+        and not f.get("suppressed")
+        for f in state.get("findings", {}).values()
+    )
     if not has_real_items and stale_ids:
         existing = set(order)
         for sid in sorted(stale_ids):
@@ -188,7 +293,7 @@ def sync_stale_dimensions(
 
 
 # ---------------------------------------------------------------------------
-# Synthesis snapshot hash + sync
+# Triage snapshot hash + sync
 # ---------------------------------------------------------------------------
 
 def review_finding_snapshot_hash(state: StateModel) -> str:
@@ -208,8 +313,8 @@ def review_finding_snapshot_hash(state: StateModel) -> str:
 
 
 @dataclass
-class SynthesisSyncResult:
-    """What changed during a synthesis sync."""
+class TriageSyncResult:
+    """What changed during a triage sync."""
 
     injected: bool = False
     pruned: bool = False
@@ -219,42 +324,191 @@ class SynthesisSyncResult:
         return int(self.injected) + int(self.pruned)
 
 
-def sync_synthesis_needed(
+def sync_triage_needed(
     plan: PlanModel,
     state: StateModel,
-) -> SynthesisSyncResult:
-    """Inject ``synthesis::pending`` at front of queue when review findings change.
+) -> TriageSyncResult:
+    """Inject 4 triage stage IDs at front of queue when review findings change.
 
-    Never auto-prunes — only explicit completion (``_apply_completion``) removes it.
+    Only injects stages not already confirmed in ``epic_triage_meta``.
+    Never auto-prunes — only explicit completion removes them.
+
+    When findings are *resolved* (current IDs are a subset of previously
+    triaged IDs), the snapshot hash is updated silently — no re-triage
+    is needed since the user is working through the plan.
     """
     ensure_plan_defaults(plan)
-    result = SynthesisSyncResult()
+    result = TriageSyncResult()
     order: list[str] = plan["queue_order"]
-    meta = plan.get("epic_synthesis_meta", {})
-    already_present = SYNTHESIS_ID in order
+    meta = plan.get("epic_triage_meta", {})
+    confirmed = set(meta.get("triage_stages", {}).keys())
+
+    # Check if any triage stage is already in queue
+    already_present = any(sid in order for sid in TRIAGE_IDS)
 
     current_hash = review_finding_snapshot_hash(state)
     last_hash = meta.get("finding_snapshot_hash", "")
 
-    # If hash changed and not already present, inject at front
     if current_hash and current_hash != last_hash and not already_present:
-        order.insert(0, SYNTHESIS_ID)
-        result.injected = True
+        # Distinguish "new findings appeared" from "findings were resolved".
+        # Only re-triage when genuinely new findings exist.
+        findings = state.get("findings", {})
+        current_review_ids = {
+            fid for fid, f in findings.items()
+            if f.get("status") == "open"
+            and f.get("detector") in ("review", "concerns")
+        }
+        triaged_ids = set(meta.get("triaged_ids", []))
+        new_since_triage = current_review_ids - triaged_ids
 
-    # Never auto-prune: synthesis::pending is only removed by explicit completion
+        if new_since_triage:
+            # New review findings appeared — re-triage needed
+            insert_at = _after_promoted(order, plan)
+            stage_names = ("observe", "reflect", "organize", "commit")
+            existing = set(order)
+            injected_count = 0
+            for sid, name in zip(TRIAGE_STAGE_IDS, stage_names):
+                if name not in confirmed and sid not in existing:
+                    order.insert(insert_at + injected_count, sid)
+                    injected_count += 1
+            if injected_count:
+                result.injected = True
+        else:
+            # Only resolved findings changed the hash — update silently
+            meta["finding_snapshot_hash"] = current_hash
+            plan["epic_triage_meta"] = meta
 
     return result
 
 
+@dataclass
+class CreatePlanSyncResult:
+    """What changed during a create-plan sync."""
+
+    injected: bool = False
+
+    @property
+    def changes(self) -> int:
+        return int(self.injected)
+
+
+def sync_create_plan_needed(
+    plan: PlanModel,
+    state: StateModel,
+) -> CreatePlanSyncResult:
+    """Inject ``workflow::create-plan`` when reviews complete + objective backlog exists.
+
+    Only injects when:
+    - No unscored (placeholder) subjective dimensions remain
+    - At least one objective finding exists
+    - ``workflow::create-plan`` is not already in the queue
+    - No triage stages are pending
+    """
+    ensure_plan_defaults(plan)
+    result = CreatePlanSyncResult()
+    order: list[str] = plan["queue_order"]
+
+    if WORKFLOW_CREATE_PLAN_ID in order:
+        return result
+
+    # Don't inject if triage stages are pending
+    if any(sid in order for sid in TRIAGE_IDS):
+        return result
+
+    # Check that no unscored dimensions remain
+    unscored = current_unscored_ids(state)
+    if unscored:
+        return result
+
+    # Check that objective findings exist
+    findings = state.get("findings", {})
+    has_objective = any(
+        f.get("status") == "open"
+        and f.get("detector") not in NON_OBJECTIVE_DETECTORS
+        for f in findings.values()
+    )
+    if not has_objective:
+        return result
+
+    # Insert after any subjective items, before findings
+    insert_at = 0
+    for i, fid in enumerate(order):
+        if fid.startswith(SUBJECTIVE_PREFIX) or fid.startswith(TRIAGE_PREFIX):
+            insert_at = i + 1
+    order.insert(insert_at, WORKFLOW_CREATE_PLAN_ID)
+    result.injected = True
+    return result
+
+
+def compute_new_finding_ids(plan: PlanModel, state: StateModel) -> set[str]:
+    """Return the set of open review/concerns finding IDs added since last triage.
+
+    Returns an empty set when no prior triage has recorded ``triaged_ids``.
+    """
+    meta = plan.get("epic_triage_meta", {})
+    triaged = set(meta.get("triaged_ids", meta.get("synthesized_ids", [])))
+    current = {
+        fid for fid, f in state.get("findings", {}).items()
+        if f.get("status") == "open" and f.get("detector") in ("review", "concerns")
+    }
+    return current - triaged if triaged else set()
+
+
+def is_triage_stale(plan: PlanModel, state: StateModel) -> bool:
+    """Side-effect-free check: is triage needed?
+
+    Returns True when any ``triage::*`` stage ID is in the queue OR
+    genuinely *new* review findings appeared since the last triage.
+
+    When findings are merely resolved (current IDs are a subset of
+    previously triaged IDs), triage is NOT stale — the user is working
+    through the plan.
+    """
+    ensure_plan_defaults(plan)
+    order = set(plan.get("queue_order", []))
+    if order & TRIAGE_IDS:
+        return True
+    meta = plan.get("epic_triage_meta", {})
+    last_hash = meta.get("finding_snapshot_hash", "")
+    if not last_hash:
+        return False
+    current_hash = review_finding_snapshot_hash(state)
+    if not current_hash or current_hash == last_hash:
+        return False
+    # Hash changed — check if new findings appeared or only resolutions
+    findings = state.get("findings", {})
+    current_review_ids = {
+        fid for fid, f in findings.items()
+        if f.get("status") == "open"
+        and f.get("detector") in ("review", "concerns")
+    }
+    triaged_ids = set(meta.get("triaged_ids", []))
+    new_since_triage = current_review_ids - triaged_ids
+    return bool(new_since_triage)
+
+
+
 __all__ = [
+    "NON_OBJECTIVE_DETECTORS",
     "SUBJECTIVE_PREFIX",
-    "SYNTHESIS_ID",
+    "TRIAGE_ID",
+    "TRIAGE_IDS",
+    "TRIAGE_PREFIX",
+    "TRIAGE_STAGE_IDS",
+    "SYNTHETIC_PREFIXES",
+    "WORKFLOW_CREATE_PLAN_ID",
+    "WORKFLOW_PREFIX",
+    "CreatePlanSyncResult",
     "StaleDimensionSyncResult",
-    "SynthesisSyncResult",
+    "TriageSyncResult",
     "UnscoredDimensionSyncResult",
-    "_current_unscored_ids",
+    "current_under_target_ids",
+    "current_unscored_ids",
+    "compute_new_finding_ids",
+    "is_triage_stale",
     "review_finding_snapshot_hash",
+    "sync_create_plan_needed",
     "sync_stale_dimensions",
-    "sync_synthesis_needed",
+    "sync_triage_needed",
     "sync_unscored_dimensions",
 ]

@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT, strip_c_style_comments
+from desloppify.core.text_api import PROJECT_ROOT, strip_c_style_comments
 from desloppify.languages.dart.pubspec import read_package_name
 
 _DART_LOGIC_RE = re.compile(

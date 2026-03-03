@@ -9,13 +9,15 @@ import logging
 from desloppify import state as state_mod
 from desloppify.app.commands.helpers.lang import resolve_lang
 from desloppify.app.commands.helpers.queue_progress import (
+    format_queue_block,
     get_plan_start_strict,
-    plan_aware_queue_count,
+    plan_aware_queue_breakdown,
     print_frozen_score_with_queue_context,
 )
 from desloppify.app.commands.helpers.runtime import command_runtime
 from desloppify.app.commands.helpers.score import target_strict_score_from_config
 from desloppify.app.commands.helpers.state import require_completed_scan
+from desloppify.app.commands.helpers.guardrails import print_triage_guardrail_info
 from desloppify.core.exception_sets import PLAN_LOAD_EXCEPTIONS
 from desloppify.app.commands.scan import (
     scan_reporting_dimensions as reporting_dimensions_mod,
@@ -41,7 +43,7 @@ from desloppify.engine.planning.scorecard_projection import (
 )
 from desloppify.core.output_api import colorize
 from desloppify.core.skill_docs import check_skill_version
-from desloppify.core.tooling import check_config_staleness, check_tool_staleness
+from desloppify.core.tooling import check_config_staleness
 from desloppify.intelligence.narrative import NarrativeContext, compute_narrative
 from desloppify.scoring import compute_health_breakdown
 
@@ -77,9 +79,6 @@ def cmd_status(args: argparse.Namespace) -> None:
     if not require_completed_scan(state):
         return
 
-    stale_warning = check_tool_staleness(state)
-    if stale_warning:
-        print(colorize(f"  {stale_warning}", "yellow"))
     skill_warning = check_skill_version()
     if skill_warning:
         print(colorize(f"  {skill_warning}", "yellow"))
@@ -100,38 +99,26 @@ def cmd_status(args: argparse.Namespace) -> None:
         _plan.get("queue_order") or _plan.get("clusters")
     ) else None
 
+    print_triage_guardrail_info(plan=_plan, state=state)
+
     narrative = compute_narrative(
         state,
         context=NarrativeContext(lang=lang_name, command="status", plan=_plan_active),
     )
     ignores = config.get("ignore", [])
 
-    # Show frozen plan-start score when in an active queue cycle
-    _plan_start_strict = get_plan_start_strict(_plan)
-    _status_queue_remaining = 0
-    if _plan_start_strict is not None:
-        try:
-            _status_queue_remaining = plan_aware_queue_count(state, _plan)
-        except PLAN_LOAD_EXCEPTIONS as exc:
-            logging.debug("Plan-aware queue count failed: %s", exc)
-            _status_queue_remaining = 0
-    if _plan_start_strict is not None and _status_queue_remaining > 0:
-        print_frozen_score_with_queue_context(_plan, _status_queue_remaining)
-    else:
-        for line, style in score_summary_lines(
-            overall_score=scores.overall,
-            objective_score=scores.objective,
-            strict_score=scores.strict,
-            verified_strict_score=scores.verified,
-            target_strict=target_strict_score,
-        ):
-            print(colorize(line, style))
+    _breakdown = _print_score_section(state, scores, _plan, target_strict_score)
     print_scan_metrics(state)
     print_open_scope_breakdown(state)
     print_scan_completeness(state)
 
+    # Compute objective backlog once for consistent subjective actionability gating
+    _objective_backlog = 0
+    if _breakdown is not None:
+        _objective_backlog = max(0, _breakdown.queue_total - _breakdown.subjective)
+
     if dim_scores:
-        show_dimension_table(state, dim_scores)
+        show_dimension_table(state, dim_scores, objective_backlog=_objective_backlog)
         reporting_dimensions_mod.show_score_model_breakdown(
             state,
             dim_scores=dim_scores,
@@ -145,10 +132,19 @@ def cmd_status(args: argparse.Namespace) -> None:
             state,
             dim_scores,
             target_strict_score=target_strict_score,
+            objective_backlog=_objective_backlog,
         )
 
     show_review_summary(state)
     show_structural_areas(state)
+
+    # Commit tracking reminder
+    try:
+        from desloppify.app.commands.next_parts.render import render_uncommitted_reminder
+        render_uncommitted_reminder(_plan_active)
+    except (ImportError, OSError, ValueError, KeyError, TypeError):
+        pass
+
     show_agent_plan(narrative, plan=_plan_active)
 
     if narrative.get("headline"):
@@ -180,6 +176,44 @@ def cmd_status(args: argparse.Namespace) -> None:
         verified_strict_score=scores.verified,
         plan=_plan_active,
     )
+
+
+def _print_score_section(state, scores, plan, target_strict_score):
+    """Print score header: frozen plan-start or live score with queue breakdown."""
+    plan_start_strict = get_plan_start_strict(plan)
+    breakdown = None
+    queue_remaining = 0
+    if plan_start_strict is not None:
+        try:
+            breakdown = plan_aware_queue_breakdown(state, plan)
+            queue_remaining = breakdown.queue_total
+        except PLAN_LOAD_EXCEPTIONS as exc:
+            logging.debug("Plan-aware queue count failed: %s", exc)
+            queue_remaining = 0
+    if plan_start_strict is not None and queue_remaining > 0:
+        print_frozen_score_with_queue_context(
+            plan, queue_remaining, breakdown=breakdown,
+        )
+    else:
+        for line, style in score_summary_lines(
+            overall_score=scores.overall,
+            objective_score=scores.objective,
+            strict_score=scores.strict,
+            verified_strict_score=scores.verified,
+            target_strict=target_strict_score,
+        ):
+            print(colorize(line, style))
+        # Show queue breakdown even without frozen score
+        if breakdown is None:
+            try:
+                breakdown = plan_aware_queue_breakdown(state, plan)
+            except PLAN_LOAD_EXCEPTIONS:
+                breakdown = None
+        if breakdown is not None and breakdown.queue_total > 0:
+            block = format_queue_block(breakdown)
+            for text, style in block:
+                print(colorize(text, style))
+    return breakdown
 
 
 def _status_json_payload(

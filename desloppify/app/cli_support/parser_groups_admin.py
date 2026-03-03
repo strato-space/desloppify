@@ -477,11 +477,16 @@ typical workflow:
   desloppify next                       # work on the next item
   desloppify plan done <id> --attest .. # mark as fixed
 
+patterns (used by move, skip, done, describe, note, etc.):
+  Patterns match findings by detector, file, ID prefix, glob, or name.
+  Cluster names also work as patterns — they expand to all member IDs.
+  Examples: "security", "src/foo.py", "unused::*React*", "my-cluster"
+
 subcommands:
   show       Show plan metadata summary
   queue      Compact table of upcoming queue items
   reset      Reset plan to empty
-  move       Move findings in the queue
+  move       Move findings or clusters in the queue
   done       Mark findings as fixed (score movement + next-step)
   describe   Set augmented description
   note       Set note on findings
@@ -489,7 +494,8 @@ subcommands:
   unskip     Bring skipped findings back to queue
   reopen     Reopen resolved findings
   focus      Set or clear active cluster focus
-  cluster    Manage finding clusters""",
+  cluster    Manage finding clusters
+  triage     Staged triage workflow (after review)""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_plan.add_argument("--state", type=str, default=None, help="Path to state file")
@@ -505,46 +511,53 @@ subcommands:
     # plan queue
     p_queue = plan_sub.add_parser("queue", help="Compact table of upcoming queue items")
     p_queue.add_argument("--top", type=int, default=30, help="Max items (default: 30, 0=all)")
-    p_queue.add_argument("--tier", type=int, choices=[1, 2, 3, 4], default=None,
-                         help="Show only items in this tier (T1=critical .. T4=cosmetic)")
     p_queue.add_argument("--cluster", type=str, default=None, metavar="NAME",
                          help="Filter to a specific cluster")
     p_queue.add_argument("--include-skipped", action="store_true",
                          help="Include skipped items at end")
+    p_queue.add_argument("--sort", choices=["priority", "recent"], default="priority",
+                         help="Sort order (default: priority)")
 
     # plan reset
     plan_sub.add_parser("reset", help="Reset plan to empty")
 
-    # plan move <patterns> <position> [target|N]
+    # plan move <patterns> <position> [--target TARGET]
     p_move = plan_sub.add_parser(
         "move",
         help="Move findings in the queue",
         epilog="""\
+patterns accept finding IDs, detector names, file paths, globs, or cluster names.
+cluster names expand to all member IDs automatically.
+
 examples:
-  desloppify plan move security top                    # prioritize a detector
-  desloppify plan move "unused::src/foo.ts::*" top     # prioritize by pattern
-  desloppify plan move smells bottom                   # deprioritize smells
-  desloppify plan move unused before security          # move before another""",
+  desloppify plan move security top                         # all findings from detector
+  desloppify plan move "unused::src/foo.ts::*" top          # glob pattern
+  desloppify plan move smells bottom                        # deprioritize
+  desloppify plan move my-cluster top                       # cluster members
+  desloppify plan move my-cluster unused top                # mix clusters + findings
+  desloppify plan move unused before -t security            # before a finding/cluster
+  desloppify plan move smells after -t my-cluster           # after a cluster
+  desloppify plan move security up -t 3                     # shift up 3 positions""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_move.add_argument(
         "patterns", nargs="+", metavar="PATTERN",
-        help="Finding ID(s), prefix, detector name, file path, or glob",
+        help="Finding ID(s), detector, file path, glob, or cluster name",
     )
     p_move.add_argument(
         "position", choices=["top", "bottom", "before", "after", "up", "down"],
-        help="Where to move (top, bottom, before, after, up N, down N)",
+        help="Where to move",
     )
     p_move.add_argument(
-        "target", nargs="?", default=None,
-        help="Target finding ID (for before/after) or offset (for up/down)",
+        "-t", "--target", default=None,
+        help="Required for before/after (finding ID or cluster name) and up/down (integer offset)",
     )
 
     # plan describe <patterns> "<text>"
     p_describe = plan_sub.add_parser("describe", help="Set augmented description")
     p_describe.add_argument(
         "patterns", nargs="+", metavar="PATTERN",
-        help="Finding ID(s), prefix, detector name, file path, or glob",
+        help="Finding ID(s), detector, file path, glob, or cluster name",
     )
     p_describe.add_argument("text", type=str, help="Description text")
 
@@ -552,7 +565,7 @@ examples:
     p_note = plan_sub.add_parser("note", help="Set note on findings")
     p_note.add_argument(
         "patterns", nargs="+", metavar="PATTERN",
-        help="Finding ID(s), prefix, detector name, file path, or glob",
+        help="Finding ID(s), detector, file path, glob, or cluster name",
     )
     p_note.add_argument("text", type=str, help="Note text")
 
@@ -563,7 +576,7 @@ examples:
     )
     p_skip.add_argument(
         "patterns", nargs="+", metavar="PATTERN",
-        help="Finding ID(s), prefix, detector name, file path, or glob",
+        help="Finding ID(s), detector, file path, glob, or cluster name",
     )
     p_skip.add_argument("--reason", type=str, default=None, help="Why this is being skipped")
     p_skip.add_argument(
@@ -590,7 +603,7 @@ examples:
     )
     p_unskip.add_argument(
         "patterns", nargs="+", metavar="PATTERN",
-        help="Finding ID(s), prefix, detector name, file path, or glob",
+        help="Finding ID(s), detector, file path, glob, or cluster name",
     )
 
     # plan reopen <patterns>
@@ -599,7 +612,7 @@ examples:
     )
     p_reopen.add_argument(
         "patterns", nargs="+", metavar="PATTERN",
-        help="Finding ID(s), prefix, detector name, file path, or glob",
+        help="Finding ID(s), detector, file path, glob, or cluster name",
     )
 
     # plan done <patterns> --attest [--note]
@@ -616,7 +629,7 @@ examples:
     )
     p_done.add_argument(
         "patterns", nargs="+", metavar="PATTERN",
-        help="Finding ID(s), prefix, detector name, file path, or glob",
+        help="Finding ID(s), detector, file path, glob, or cluster name",
     )
     p_done.add_argument(
         "--note", type=str, default=None, help="Explanation of the fix"
@@ -635,6 +648,13 @@ examples:
         action="store_true",
         default=False,
         help="Auto-generate attestation from --note (requires --note)",
+    )
+    p_done.add_argument(
+        "--force-resolve",
+        action="store_true",
+        default=False,
+        dest="force_resolve",
+        help="Bypass triage guardrail when new findings are pending triage",
     )
 
     # plan focus <cluster> | --clear
@@ -659,25 +679,25 @@ examples:
     # plan cluster add <cluster> <patterns...>
     p_ca = cluster_sub.add_parser("add", help="Add findings to a cluster")
     p_ca.add_argument("cluster_name", type=str, help="Cluster name")
-    p_ca.add_argument("patterns", nargs="+", metavar="PATTERN", help="Finding patterns")
+    p_ca.add_argument("patterns", nargs="+", metavar="PATTERN", help="Finding ID(s), detector, file path, glob, or cluster name")
 
     # plan cluster remove <cluster> <patterns...>
     p_cr = cluster_sub.add_parser("remove", help="Remove findings from a cluster")
     p_cr.add_argument("cluster_name", type=str, help="Cluster name")
-    p_cr.add_argument("patterns", nargs="+", metavar="PATTERN", help="Finding patterns")
+    p_cr.add_argument("patterns", nargs="+", metavar="PATTERN", help="Finding ID(s), detector, file path, glob, or cluster name")
 
     # plan cluster delete <name>
     p_cd = cluster_sub.add_parser("delete", help="Delete a cluster")
     p_cd.add_argument("cluster_name", type=str, help="Cluster name")
 
-    # plan cluster move <cluster> <position> [target]
-    p_cm = cluster_sub.add_parser("move", help="Move cluster as a block")
-    p_cm.add_argument("cluster_name", type=str, help="Cluster name")
+    # plan cluster move <cluster[,cluster…]> <position> [target]
+    p_cm = cluster_sub.add_parser("move", help="Move cluster(s) as a block")
+    p_cm.add_argument("cluster_names", type=str, help="Cluster name(s), comma-separated for multiple")
     p_cm.add_argument(
         "position", choices=["top", "bottom", "before", "after", "up", "down"],
         help="Where to move",
     )
-    p_cm.add_argument("target", nargs="?", default=None, help="Target or offset")
+    p_cm.add_argument("target", nargs="?", default=None, help="Target finding/cluster (before/after) or integer offset (up/down)")
 
     # plan cluster show <name>
     p_cs = cluster_sub.add_parser("show", help="Show cluster details and members")
@@ -686,50 +706,107 @@ examples:
     # plan cluster list
     cluster_sub.add_parser("list", help="List all clusters")
 
+    # plan cluster merge <source> <target>
+    p_cmerge = cluster_sub.add_parser("merge", help="Merge source cluster into target (moves findings, deletes source)")
+    p_cmerge.add_argument("source", type=str, help="Source cluster name (will be deleted)")
+    p_cmerge.add_argument("target", type=str, help="Target cluster name (receives findings)")
+
     # plan cluster update <name> [--description "..."] [--steps "..." ...]
     p_cu = cluster_sub.add_parser("update", help="Update cluster description and/or action steps")
     p_cu.add_argument("cluster_name", type=str, help="Cluster name")
     p_cu.add_argument("--description", type=str, default=None, help="Cluster description")
     p_cu.add_argument("--steps", nargs="+", metavar="STEP", default=None, help="Action steps list")
 
-    # plan synthesize ...
-    p_synth = plan_sub.add_parser(
-        "synthesize",
-        help="Staged synthesis workflow for review findings",
+    def _add_triage_flags(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--stage",
+            type=str,
+            choices=["observe", "reflect", "organize"],
+            default=None,
+            help="Stage to record",
+        )
+        parser.add_argument(
+            "--report", type=str, default=None,
+            help="Stage report text",
+        )
+        parser.add_argument(
+            "--complete", action="store_true", default=False,
+            help="Mark triage complete",
+        )
+        parser.add_argument(
+            "--strategy", type=str, default=None,
+            help="Strategy summary (for --complete)",
+        )
+        parser.add_argument(
+            "--confirm-existing", action="store_true", default=False,
+            help="Fast-track confirmation of existing plan",
+        )
+        parser.add_argument(
+            "--note", type=str, default=None,
+            help="Note for --confirm-existing",
+        )
+        parser.add_argument(
+            "--start", action="store_true", default=False,
+            help="Manually start triage (inject triage::pending, clear prior stages)",
+        )
+        parser.add_argument(
+            "--confirm",
+            type=str,
+            choices=["observe", "reflect", "organize"],
+            default=None,
+            help="Confirm a completed stage (shows summary, requires --attestation)",
+        )
+        parser.add_argument(
+            "--attestation",
+            type=str,
+            default=None,
+            help="Attestation text confirming stage review (min 30 chars, used with --confirm)",
+        )
+        parser.add_argument(
+            "--confirmed",
+            type=str,
+            default=None,
+            help="Plan validation text for --confirm-existing (confirms plan review)",
+        )
+        parser.add_argument(
+            "--dry-run", action="store_true", default=False,
+            help="Preview mode",
+        )
+
+    # plan triage ...
+    p_triage = plan_sub.add_parser(
+        "triage",
+        help="Staged triage workflow for review findings",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_synth.add_argument(
-        "--stage",
-        type=str,
-        choices=["observe", "reflect", "organize"],
-        default=None,
-        help="Stage to record",
-    )
-    p_synth.add_argument(
-        "--report", type=str, default=None,
-        help="Stage report text",
-    )
-    p_synth.add_argument(
-        "--complete", action="store_true", default=False,
-        help="Mark synthesis complete",
-    )
-    p_synth.add_argument(
-        "--strategy", type=str, default=None,
-        help="Strategy summary (for --complete)",
-    )
-    p_synth.add_argument(
-        "--confirm-existing", action="store_true", default=False,
-        help="Fast-track confirmation of existing plan",
-    )
-    p_synth.add_argument(
-        "--note", type=str, default=None,
-        help="Note for --confirm-existing",
-    )
-    p_synth.add_argument(
-        "--dry-run", action="store_true", default=False,
-        help="Preview mode",
-    )
+    _add_triage_flags(p_triage)
 
+    # plan commit-log ...
+    p_commit_log = plan_sub.add_parser(
+        "commit-log",
+        help="Track commits and resolved findings for PR updates",
+        epilog="""\
+examples:
+  desloppify plan commit-log                     # show status
+  desloppify plan commit-log record              # record HEAD commit
+  desloppify plan commit-log record --note "..."  # with rationale
+  desloppify plan commit-log record --only "smells::*"
+  desloppify plan commit-log history             # show commit records
+  desloppify plan commit-log pr                  # print PR body markdown""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    commit_log_sub = p_commit_log.add_subparsers(dest="commit_log_action")
+
+    p_cl_record = commit_log_sub.add_parser("record", help="Record a commit with resolved findings")
+    p_cl_record.add_argument("--sha", type=str, default=None, help="Commit SHA (default: auto-detect HEAD)")
+    p_cl_record.add_argument("--branch", type=str, default=None, help="Branch name (default: auto-detect)")
+    p_cl_record.add_argument("--note", type=str, default=None, help="Commit rationale/description")
+    p_cl_record.add_argument("--only", nargs="+", metavar="PATTERN", default=None, help="Record only matching findings (glob patterns)")
+
+    p_cl_history = commit_log_sub.add_parser("history", help="Show commit records")
+    p_cl_history.add_argument("--top", type=int, default=10, help="Number of records to show (default: 10)")
+
+    commit_log_sub.add_parser("pr", help="Print PR body markdown (dry run)")
 
 def _add_viz_parser(sub) -> None:
     p_viz = sub.add_parser("viz", help="Generate interactive HTML treemap")

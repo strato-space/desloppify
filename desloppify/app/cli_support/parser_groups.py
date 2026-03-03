@@ -188,6 +188,12 @@ examples:
         metavar="FILE",
         help="Path to investigation notes file to attach to a finding",
     )
+    p_show.add_argument(
+        "--no-budget",
+        action="store_true",
+        dest="no_budget",
+        help="Bypass per-detector noise budget (show all matching findings)",
+    )
 
 
 def _add_next_parser(sub) -> None:
@@ -195,22 +201,14 @@ def _add_next_parser(sub) -> None:
         "next",
         help="Show next highest-priority open finding",
         epilog="""\
-tiers (highest to lowest priority):
-  T1  critical    security issues, data loss risks
-  T2  important   bugs, correctness, major smells
-  T3  moderate    code quality, duplication, dead code
-  T4  cosmetic    style, subjective review dimensions
-
 examples:
   desloppify next                       # single highest-priority item
   desloppify next --count 10            # top 10 items
-  desloppify next --tier 1              # only tier 1
   desloppify next --group file          # group by file
   desloppify next --cluster my-cluster  # items in a cluster""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_next.add_argument("--state", type=str, default=None, help="Path to state file")
-    p_next.add_argument("--tier", type=int, choices=[1, 2, 3, 4], default=None, help="Show only this tier")
     p_next.add_argument(
         "--count", type=int, default=1, help="Number of items to show (default: 1)"
     )
@@ -228,9 +226,9 @@ examples:
     )
     p_next.add_argument(
         "--group",
-        choices=["item", "file", "detector", "tier"],
+        choices=["item", "file", "detector"],
         default="item",
-        help="Group output by item, file, detector, or tier",
+        help="Group output by item, file, or detector",
     )
     p_next.add_argument(
         "--format",
@@ -241,12 +239,7 @@ examples:
     p_next.add_argument(
         "--explain",
         action="store_true",
-        help="Show ranking and tier-fallback rationale",
-    )
-    p_next.add_argument(
-        "--no-tier-fallback",
-        action="store_true",
-        help="Do not auto-fallback to another tier when --tier has no items",
+        help="Show ranking rationale",
     )
     p_next.add_argument(
         "--cluster",

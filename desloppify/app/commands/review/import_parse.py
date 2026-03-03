@@ -1,0 +1,514 @@
+"""Payload parsing and validation helpers for review imports."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from desloppify.core.coercions_api import coerce_optional_str, option_value
+from .import_policy import (
+    ASSESSMENT_POLICY_KEY,
+    apply_assessment_import_policy,
+)
+from desloppify.intelligence.review.feedback_contract import (
+    ASSESSMENT_FEEDBACK_THRESHOLD,
+    LOW_SCORE_FINDING_THRESHOLD,
+    score_requires_dimension_finding,
+    score_requires_explicit_feedback,
+)
+from desloppify.intelligence.review.dimensions.data import load_dimensions_for_lang
+from desloppify.intelligence.review.importing.contracts import (
+    AssessmentImportPolicyModel,
+    ReviewFindingPayload,
+    ReviewImportPayload,
+    validate_review_finding_payload,
+)
+from desloppify.state import coerce_assessment_score
+
+
+class ImportPayloadLoadError(ValueError):
+    """Raised when review import payload parsing/validation fails."""
+
+    def __init__(self, errors: list[str]) -> None:
+        cleaned = [str(error).strip() for error in errors if str(error).strip()]
+        self.errors = cleaned
+        message = "; ".join(cleaned) if cleaned else "import payload validation failed"
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class ImportParseOptions:
+    """Import parse policy/options bundle."""
+
+    lang_name: str | None = None
+    allow_partial: bool = False
+    trusted_assessment_source: bool = False
+    trusted_assessment_label: str | None = None
+    attested_external: bool = False
+    manual_override: bool = False
+    manual_attest: str | None = None
+    assessment_override: bool = False
+    assessment_note: str | None = None
+
+
+def _coerce_import_parse_options(
+    options: ImportParseOptions | None = None,
+    **legacy_options: object,
+) -> ImportParseOptions:
+    """Resolve import-parse options from dataclass and legacy keyword args."""
+    return ImportParseOptions(
+        lang_name=coerce_optional_str(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="lang_name",
+                default=None,
+            )
+        ),
+        allow_partial=bool(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="allow_partial",
+                default=False,
+            )
+        ),
+        trusted_assessment_source=bool(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="trusted_assessment_source",
+                default=False,
+            )
+        ),
+        trusted_assessment_label=coerce_optional_str(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="trusted_assessment_label",
+                default=None,
+            )
+        ),
+        attested_external=bool(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="attested_external",
+                default=False,
+            )
+        ),
+        manual_override=bool(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="manual_override",
+                default=False,
+            )
+        ),
+        manual_attest=coerce_optional_str(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="manual_attest",
+                default=None,
+            )
+        ),
+        assessment_override=bool(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="assessment_override",
+                default=False,
+            )
+        ),
+        assessment_note=coerce_optional_str(
+            option_value(
+                options=options,
+                legacy_options=legacy_options,
+                name="assessment_note",
+                default=None,
+            )
+        ),
+    )
+
+
+def _normalize_import_payload_shape(
+    payload: dict[str, Any],
+) -> tuple[ReviewImportPayload | None, list[str]]:
+    """Normalize payload into required-key contract with strict type checks."""
+    errors: list[str] = []
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        errors.append("findings must be a JSON array")
+        findings = []
+
+    assessments = _coerce_optional_object(payload, key="assessments", errors=errors)
+    normalized_reviewed_files = _coerce_reviewed_files(payload, errors=errors)
+    review_scope = _coerce_optional_object(payload, key="review_scope", errors=errors)
+    provenance = _coerce_optional_object(payload, key="provenance", errors=errors)
+    dimension_notes = _coerce_optional_object(payload, key="dimension_notes", errors=errors)
+
+    policy = payload.get(ASSESSMENT_POLICY_KEY)
+    normalized_policy = (
+        policy if isinstance(policy, dict) else AssessmentImportPolicyModel().to_dict()
+    )
+    if errors:
+        return None, errors
+    return (
+        {
+            "findings": findings,
+            "assessments": assessments,
+            "reviewed_files": normalized_reviewed_files,
+            "review_scope": review_scope,
+            "provenance": provenance,
+            "dimension_notes": dimension_notes,
+            ASSESSMENT_POLICY_KEY: normalized_policy,
+        },
+        [],
+    )
+
+
+def _coerce_optional_object(
+    payload: dict[str, Any],
+    *,
+    key: str,
+    errors: list[str],
+) -> dict[str, Any]:
+    """Normalize optional object payload fields to dictionaries."""
+    value = payload.get(key)
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    errors.append(f"{key} must be an object when provided")
+    return {}
+
+
+def _coerce_reviewed_files(payload: dict[str, Any], *, errors: list[str]) -> list[str]:
+    """Normalize reviewed_files to trimmed string list."""
+    reviewed_files = payload.get("reviewed_files")
+    if reviewed_files is None:
+        return []
+    if isinstance(reviewed_files, list):
+        return [
+            str(item).strip()
+            for item in reviewed_files
+            if isinstance(item, str) and str(item).strip()
+        ]
+    errors.append("reviewed_files must be an array when provided")
+    return []
+
+
+def resolve_override_context(
+    *,
+    manual_override: bool,
+    manual_attest: str | None,
+    assessment_override: bool,
+    assessment_note: str | None,
+) -> tuple[bool, str | None]:
+    """Support legacy assessment_* flags while preferring manual_* naming."""
+    override = bool(manual_override or assessment_override)
+    attest = (
+        manual_attest
+        if isinstance(manual_attest, str) and manual_attest.strip()
+        else assessment_note
+    )
+    if isinstance(attest, str):
+        attest = attest.strip()
+    return override, attest
+
+
+def _has_non_empty_strings(items: object) -> bool:
+    """Return True when ``items`` is a list with at least one non-empty string."""
+    return isinstance(items, list) and any(
+        isinstance(item, str) and item.strip() for item in items
+    )
+
+
+def _validate_holistic_findings_schema(
+    findings_data: ReviewImportPayload,
+    *,
+    lang_name: str | None = None,
+) -> list[str]:
+    """Validate strict holistic finding schema expected by issue import."""
+    findings = findings_data["findings"]
+
+    allowed_dimensions: set[str] = set()
+    if isinstance(lang_name, str) and lang_name.strip():
+        _, dimension_prompts, _ = load_dimensions_for_lang(lang_name)
+        allowed_dimensions = set(dimension_prompts)
+
+    errors: list[str] = []
+    for idx, entry in enumerate(findings):
+        _normalized: ReviewFindingPayload | None
+        _normalized, entry_errors = validate_review_finding_payload(
+            entry,
+            label=f"findings[{idx}]",
+            allowed_dimensions=allowed_dimensions or None,
+            allow_dismissed=True,
+        )
+        for message in entry_errors:
+            if (
+                "is not allowed" in message
+                and lang_name
+                and "dimension '" in message
+            ):
+                message = message.replace(
+                    "is not allowed",
+                    f"is not valid for language '{lang_name}'",
+                )
+            errors.append(message)
+    return errors
+
+
+def _feedback_dimensions_from_findings(findings: object) -> set[str]:
+    """Return dimensions with explicit improvement guidance in findings payload."""
+    if not isinstance(findings, list):
+        return set()
+    dims: set[str] = set()
+    for entry in findings:
+        if not isinstance(entry, dict):
+            continue
+        dim = entry.get("dimension")
+        if not isinstance(dim, str) or not dim.strip():
+            continue
+        suggestion = entry.get("suggestion")
+        if isinstance(suggestion, str) and suggestion.strip():
+            dims.add(dim.strip())
+    return dims
+
+
+def _feedback_dimensions_from_dimension_notes(dimension_notes: object) -> set[str]:
+    """Return dimensions with concrete review evidence in dimension_notes payload."""
+    if not isinstance(dimension_notes, dict):
+        return set()
+    dims: set[str] = set()
+    for dim, note in dimension_notes.items():
+        if not isinstance(dim, str) or not dim.strip():
+            continue
+        if not isinstance(note, dict):
+            continue
+        if not _has_non_empty_strings(note.get("evidence")):
+            continue
+        dims.add(dim.strip())
+    return dims
+
+
+def _validate_assessment_feedback(
+    findings_data: ReviewImportPayload,
+) -> tuple[list[str], list[str]]:
+    """Return dimensions missing required feedback and required low-score findings."""
+    assessments = findings_data["assessments"]
+    if not assessments:
+        return [], []
+
+    finding_dims = _feedback_dimensions_from_findings(findings_data["findings"])
+    feedback_dims = set(finding_dims)
+    feedback_dims.update(
+        _feedback_dimensions_from_dimension_notes(findings_data["dimension_notes"])
+    )
+    missing_feedback: list[str] = []
+    missing_low_score_findings: list[str] = []
+    for dim_name, payload in assessments.items():
+        if not isinstance(dim_name, str) or not dim_name.strip():
+            continue
+        score = coerce_assessment_score(payload)
+        if score is None:
+            continue
+        if score_requires_dimension_finding(score) and dim_name not in finding_dims:
+            missing_low_score_findings.append(f"{dim_name} ({score:.1f})")
+        if score_requires_explicit_feedback(score) and dim_name not in feedback_dims:
+            missing_feedback.append(f"{dim_name} ({score:.1f})")
+    return sorted(missing_feedback), sorted(missing_low_score_findings)
+
+
+def _load_import_json(import_file: str) -> tuple[object | None, list[str]]:
+    """Read import file and parse JSON payload."""
+    findings_path = Path(import_file)
+    if not findings_path.exists():
+        return None, [f"file not found: {import_file}"]
+    try:
+        return json.loads(findings_path.read_text()), []
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, [f"error reading findings: {exc}"]
+
+
+def _normalize_import_root_payload(raw_payload: object) -> tuple[dict[str, Any] | None, list[str]]:
+    """Normalize top-level payload shape before strict field validation."""
+    payload = {"findings": raw_payload} if isinstance(raw_payload, list) else raw_payload
+    if not isinstance(payload, dict):
+        return None, ["findings file must contain a JSON array or object"]
+    if "findings" not in payload:
+        return None, ["findings object must contain a 'findings' key"]
+    return payload, []
+
+
+def _validate_override_option_conflicts(
+    options: ImportParseOptions,
+    *,
+    override_enabled: bool,
+) -> list[str]:
+    """Validate mutually exclusive override/attestation option combinations."""
+    if options.attested_external and override_enabled:
+        return ["--attested-external cannot be combined with --manual-override"]
+    if options.attested_external and options.allow_partial:
+        return [
+            "--attested-external cannot be combined with --allow-partial; "
+            "attested score imports require fully valid findings payloads"
+        ]
+    if override_enabled and options.allow_partial:
+        return [
+            "--manual-override cannot be combined with --allow-partial; "
+            "manual score imports require fully valid findings payloads"
+        ]
+    return []
+
+
+def _validate_feedback_requirements(
+    findings_data: ReviewImportPayload,
+    *,
+    override_enabled: bool,
+    override_attest: str | None,
+) -> list[str]:
+    """Validate feedback and low-score finding requirements."""
+    missing_feedback, missing_low_score_findings = _validate_assessment_feedback(findings_data)
+    if missing_low_score_findings:
+        if override_enabled:
+            if not isinstance(override_attest, str) or not override_attest.strip():
+                return ["--manual-override requires --attest"]
+            return []
+        return [
+            f"assessments below {LOW_SCORE_FINDING_THRESHOLD:.1f} must include at "
+            "least one finding for that same dimension with a concrete suggestion. "
+            f"Missing: {', '.join(missing_low_score_findings)}"
+        ]
+    if not missing_feedback:
+        return []
+    if override_enabled:
+        if not isinstance(override_attest, str) or not override_attest.strip():
+            return ["--manual-override requires --attest"]
+        return []
+    return [
+        f"assessments below {ASSESSMENT_FEEDBACK_THRESHOLD:.1f} must include explicit feedback "
+        "(finding with same dimension and non-empty suggestion, or "
+        "dimension_notes evidence for that dimension). "
+        f"Missing: {', '.join(missing_feedback)}"
+    ]
+
+
+def _validate_schema_requirements(
+    findings_data: ReviewImportPayload,
+    *,
+    lang_name: str | None,
+    allow_partial: bool,
+) -> list[str]:
+    """Validate holistic finding schema unless partial imports are enabled."""
+    schema_errors = _validate_holistic_findings_schema(findings_data, lang_name=lang_name)
+    if not schema_errors or allow_partial:
+        return []
+    visible_errors = schema_errors[:10]
+    remaining = len(schema_errors) - len(visible_errors)
+    errors = [
+        "findings schema validation failed for holistic import. "
+        "Fix payload or rerun with --allow-partial to continue."
+    ]
+    errors.extend(visible_errors)
+    if remaining > 0:
+        errors.append(f"... {remaining} additional schema error(s) omitted")
+    return errors
+
+
+def _parse_and_validate_import(
+    import_file: str,
+    *,
+    options: ImportParseOptions | None = None,
+    **legacy_options: object,
+) -> tuple[ReviewImportPayload | None, list[str]]:
+    """Parse and validate a review import file (pure function)."""
+    resolved_options = _coerce_import_parse_options(options, **legacy_options)
+
+    raw_payload, load_errors = _load_import_json(import_file)
+    if load_errors:
+        return None, load_errors
+    normalized_root, root_errors = _normalize_import_root_payload(raw_payload)
+    if root_errors:
+        return None, root_errors
+    if normalized_root is None:
+        return None, ["findings payload root normalization returned no data"]
+
+    normalized_findings_data, shape_errors = _normalize_import_payload_shape(normalized_root)
+    if shape_errors:
+        return None, shape_errors
+    if normalized_findings_data is None:
+        return None, ["findings payload normalization returned no data"]
+
+    override_enabled, override_attest = resolve_override_context(
+        manual_override=resolved_options.manual_override,
+        manual_attest=resolved_options.manual_attest,
+        assessment_override=resolved_options.assessment_override,
+        assessment_note=resolved_options.assessment_note,
+    )
+    conflict_errors = _validate_override_option_conflicts(
+        resolved_options,
+        override_enabled=override_enabled,
+    )
+    if conflict_errors:
+        return None, conflict_errors
+
+    findings_data, policy_errors = apply_assessment_import_policy(
+        normalized_findings_data,
+        import_file=import_file,
+        attested_external=resolved_options.attested_external,
+        attested_attest=override_attest,
+        manual_override=override_enabled,
+        manual_attest=override_attest,
+        trusted_assessment_source=resolved_options.trusted_assessment_source,
+        trusted_assessment_label=resolved_options.trusted_assessment_label,
+    )
+    if policy_errors:
+        return None, policy_errors
+    if findings_data is None:
+        return None, ["assessment import policy returned no payload"]
+
+    feedback_errors = _validate_feedback_requirements(
+        findings_data,
+        override_enabled=override_enabled,
+        override_attest=override_attest,
+    )
+    if feedback_errors:
+        return None, feedback_errors
+
+    schema_errors = _validate_schema_requirements(
+        findings_data,
+        lang_name=resolved_options.lang_name,
+        allow_partial=resolved_options.allow_partial,
+    )
+    if schema_errors:
+        return None, schema_errors
+
+    return findings_data, []
+
+
+def load_import_findings_data(
+    import_file: str,
+    *,
+    colorize_fn=None,
+    options: ImportParseOptions | None = None,
+    **legacy_options: object,
+) -> ReviewImportPayload:
+    """Load and normalize review import payload to object format.
+
+    Raises ``ImportPayloadLoadError`` when validation fails.
+    """
+    resolved_options = _coerce_import_parse_options(options, **legacy_options)
+    data, errors = _parse_and_validate_import(
+        import_file,
+        options=resolved_options,
+    )
+    if errors:
+        raise ImportPayloadLoadError(errors)
+    if data is None:
+        raise ImportPayloadLoadError(["import payload is empty after validation"])
+    return data

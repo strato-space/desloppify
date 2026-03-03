@@ -357,7 +357,33 @@ def resolve_lua_import(import_text: str, source_file: str, scan_path: str) -> st
 
 
 def resolve_swift_import(import_text: str, source_file: str, scan_path: str) -> str | None:
-    """Swift uses module-level imports — not resolvable to individual files."""
+    """Best-effort local Swift import resolution.
+
+    Swift imports are usually module-level and often external. Resolve only when
+    the import path clearly matches a local ``.swift`` file.
+    """
+    text = import_text.strip()
+    if not text:
+        return None
+
+    module_path = text.replace(".", os.sep)
+    leaf = module_path.split(os.sep)[-1]
+    source_dir = os.path.dirname(source_file)
+
+    candidates = [
+        os.path.join(source_dir, module_path + ".swift"),
+        os.path.join(scan_path, module_path + ".swift"),
+        os.path.join(scan_path, "Sources", module_path + ".swift"),
+        os.path.join(scan_path, "Sources", module_path, f"{leaf}.swift"),
+        os.path.join(scan_path, module_path, f"{leaf}.swift"),
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.isfile(candidate):
+            return candidate
     return None
 
 

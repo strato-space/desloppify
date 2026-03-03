@@ -8,8 +8,11 @@ from collections import defaultdict
 from desloppify.core.registry import DETECTORS, DetectorMeta
 from desloppify.engine._plan.schema import Cluster, PlanModel, ensure_plan_defaults
 from desloppify.engine._plan.stale_dimensions import (
+    NON_OBJECTIVE_DETECTORS,
     SUBJECTIVE_PREFIX,
-    _current_unscored_ids,
+    _current_stale_ids,
+    current_under_target_ids,
+    current_unscored_ids,
 )
 from desloppify.engine._state.schema import StateModel, utc_now
 
@@ -19,6 +22,8 @@ _STALE_KEY = "subjective::stale"
 _STALE_NAME = "auto/stale-review"
 _UNSCORED_KEY = "subjective::unscored"
 _UNSCORED_NAME = "auto/initial-review"
+_UNDER_TARGET_KEY = "subjective::under-target"
+_UNDER_TARGET_NAME = "auto/under-target-review"
 _MIN_UNSCORED_CLUSTER_SIZE = 1
 
 
@@ -217,19 +222,104 @@ def _generate_action(
 
 
 # ---------------------------------------------------------------------------
+# Repair
+# ---------------------------------------------------------------------------
+
+def _repair_ghost_cluster_refs(plan: PlanModel, now: str) -> int:
+    """Clear override cluster refs that point to non-existent clusters."""
+    clusters = plan.get("clusters", {})
+    overrides = plan.get("overrides", {})
+    repaired = 0
+    for override in overrides.values():
+        cluster_name = override.get("cluster")
+        if cluster_name and cluster_name not in clusters:
+            override["cluster"] = None
+            override["updated_at"] = now
+            repaired += 1
+    return repaired
+
+
+# ---------------------------------------------------------------------------
+# Shared create-or-update helper
+# ---------------------------------------------------------------------------
+
+def _sync_auto_cluster(
+    plan: PlanModel,
+    clusters: dict,
+    existing_by_key: dict[str, str],
+    *,
+    cluster_key: str,
+    cluster_name: str,
+    member_ids: list[str],
+    description: str,
+    action: str,
+    now: str,
+    optional: bool = False,
+) -> int:
+    """Create or update an auto-cluster and sync its override entries.
+
+    Handles the common pattern: check if cluster exists by key, update
+    membership/metadata if changed, or create a new cluster.  Always syncs
+    override entries for all *member_ids*.
+
+    Returns 1 if a change was made, 0 otherwise.
+    """
+    changes = 0
+    existing_name = existing_by_key.get(cluster_key)
+    if existing_name and existing_name in clusters:
+        cluster = clusters[existing_name]
+        old_ids = set(cluster.get("finding_ids", []))
+        new_ids_set = set(member_ids)
+        if old_ids != new_ids_set or cluster.get("description") != description or cluster.get("action") != action:
+            cluster["finding_ids"] = list(member_ids)
+            cluster["description"] = description
+            cluster["action"] = action
+            cluster["updated_at"] = now
+            changes = 1
+    else:
+        new_cluster: Cluster = {
+            "name": cluster_name,
+            "description": description,
+            "finding_ids": list(member_ids),
+            "created_at": now,
+            "updated_at": now,
+            "auto": True,
+            "cluster_key": cluster_key,
+            "action": action,
+            "user_modified": False,
+        }
+        if optional:
+            new_cluster["optional"] = True
+        clusters[cluster_name] = new_cluster
+        existing_by_key[cluster_key] = cluster_name
+        changes = 1
+
+    # Sync overrides
+    overrides = plan.get("overrides", {})
+    current_name = existing_by_key.get(cluster_key, cluster_name)
+    for fid in member_ids:
+        if fid not in overrides:
+            overrides[fid] = {"finding_id": fid, "created_at": now}
+        overrides[fid]["cluster"] = current_name
+        overrides[fid]["updated_at"] = now
+
+    return changes
+
+
+# ---------------------------------------------------------------------------
 # Main algorithm
 # ---------------------------------------------------------------------------
 
-def auto_cluster_findings(plan: PlanModel, state: StateModel) -> int:
-    """Regenerate auto-clusters from current open findings.
-
-    Returns count of changes made (clusters created, updated, or deleted).
-    """
-    ensure_plan_defaults(plan)
+def _sync_finding_clusters(
+    plan: PlanModel,
+    findings: dict,
+    clusters: dict,
+    existing_by_key: dict[str, str],
+    active_auto_keys: set[str],
+    now: str,
+) -> int:
+    """Group open findings by detector/subtype and sync auto-clusters."""
     changes = 0
-
-    findings = state.get("findings", {})
-    clusters = plan.get("clusters", {})
 
     # Set of finding IDs in manual (non-auto) clusters
     manual_member_ids: set[str] = set()
@@ -260,17 +350,6 @@ def auto_cluster_findings(plan: PlanModel, state: StateModel) -> int:
     # Drop singleton groups
     groups = {k: v for k, v in groups.items() if len(v) >= _MIN_CLUSTER_SIZE}
 
-    # Map existing auto-clusters by cluster_key
-    existing_by_key: dict[str, str] = {}  # cluster_key → cluster_name
-    for name, cluster in list(clusters.items()):
-        if cluster.get("auto"):
-            ck = cluster.get("cluster_key", "")
-            if ck:
-                existing_by_key[ck] = name
-
-    now = utc_now()
-    active_auto_keys: set[str] = set()
-
     for key, member_ids in groups.items():
         active_auto_keys.add(key)
         cluster_name = _cluster_name_from_key(key)
@@ -288,69 +367,69 @@ def auto_cluster_findings(plan: PlanModel, state: StateModel) -> int:
         description = _generate_description(cluster_name, members, meta, subtype)
         action = _generate_action(meta, subtype)
 
+        # User-modified clusters: merge new members only, keep user edits
         existing_name = existing_by_key.get(key)
         if existing_name and existing_name in clusters:
             cluster = clusters[existing_name]
             if cluster.get("user_modified"):
-                # Merge new findings in, don't remove user's edits
                 existing_ids = set(cluster.get("finding_ids", []))
                 new_ids = [fid for fid in member_ids if fid not in existing_ids]
                 if new_ids:
                     cluster["finding_ids"].extend(new_ids)
                     cluster["updated_at"] = now
                     changes += 1
-            else:
-                # Replace membership wholesale
-                old_ids = set(cluster.get("finding_ids", []))
-                new_ids = set(member_ids)
-                if old_ids != new_ids or cluster.get("description") != description or cluster.get("action") != action:
-                    cluster["finding_ids"] = list(member_ids)
-                    cluster["description"] = description
-                    cluster["action"] = action
-                    cluster["updated_at"] = now
-                    changes += 1
-        else:
-            # Handle name collision (existing auto-cluster with different key)
-            # If cluster_name already exists with a different key, skip
-            if cluster_name in clusters and clusters[cluster_name].get("cluster_key") != key:
-                # Append a disambiguator
-                cluster_name = f"{cluster_name}-{len(member_ids)}"
+                # Still sync overrides for all members
+                overrides = plan.get("overrides", {})
+                for fid in member_ids:
+                    if fid not in overrides:
+                        overrides[fid] = {"finding_id": fid, "created_at": now}
+                    overrides[fid]["cluster"] = existing_name
+                    overrides[fid]["updated_at"] = now
+                continue
 
-            new_cluster: Cluster = {
-                "name": cluster_name,
-                "description": description,
-                "finding_ids": list(member_ids),
-                "created_at": now,
-                "updated_at": now,
-                "auto": True,
-                "cluster_key": key,
-                "action": action,
-                "user_modified": False,
-            }
-            clusters[cluster_name] = new_cluster
-            existing_by_key[key] = cluster_name
-            changes += 1
+        # Handle name collision (existing auto-cluster with different key)
+        if cluster_name in clusters and clusters[cluster_name].get("cluster_key") != key:
+            cluster_name = f"{cluster_name}-{len(member_ids)}"
 
-        # Update overrides to track cluster membership
-        overrides = plan.get("overrides", {})
-        current_name = existing_by_key.get(key, cluster_name)
-        for fid in member_ids:
-            if fid not in overrides:
-                overrides[fid] = {"finding_id": fid, "created_at": now}
-            overrides[fid]["cluster"] = current_name
-            overrides[fid]["updated_at"] = now
+        changes += _sync_auto_cluster(
+            plan, clusters, existing_by_key,
+            cluster_key=key,
+            cluster_name=cluster_name,
+            member_ids=member_ids,
+            description=description,
+            action=action,
+            now=now,
+        )
 
-    # --- Subjective dimension clusters (unscored + stale) -------------------
+    return changes
+
+
+def _sync_subjective_clusters(
+    plan: PlanModel,
+    state: StateModel,
+    findings: dict,
+    clusters: dict,
+    existing_by_key: dict[str, str],
+    active_auto_keys: set[str],
+    now: str,
+    *,
+    target_strict: float,
+) -> int:
+    """Sync unscored, stale, and under-target subjective dimension clusters."""
+    changes = 0
+
     all_subjective_ids = sorted(
         fid for fid in plan.get("queue_order", [])
         if fid.startswith(SUBJECTIVE_PREFIX)
     )
-    unscored_state_ids = _current_unscored_ids(state)
+    unscored_state_ids = current_unscored_ids(state)
     unscored_queue_ids = sorted(
         fid for fid in all_subjective_ids if fid in unscored_state_ids
     )
+    stale_state_ids = _current_stale_ids(state)
     stale_queue_ids = sorted(
-        fid for fid in all_subjective_ids if fid not in unscored_state_ids
+        fid for fid in all_subjective_ids
+        if fid in stale_state_ids and fid not in unscored_state_ids
     )
 
     # -- Initial review cluster (unscored, min size 1) ---------------------
@@ -359,40 +438,15 @@ def auto_cluster_findings(plan: PlanModel, state: StateModel) -> int:
         cli_keys = [fid.removeprefix(SUBJECTIVE_PREFIX) for fid in unscored_queue_ids]
         description = f"Initial review of {len(unscored_queue_ids)} unscored subjective dimensions"
         action = f"desloppify review --prepare --dimensions {','.join(cli_keys)}"
-
-        existing_name = existing_by_key.get(_UNSCORED_KEY)
-        if existing_name and existing_name in clusters:
-            cluster = clusters[existing_name]
-            old_ids = set(cluster.get("finding_ids", []))
-            new_ids = set(unscored_queue_ids)
-            if old_ids != new_ids or cluster.get("description") != description or cluster.get("action") != action:
-                cluster["finding_ids"] = unscored_queue_ids
-                cluster["description"] = description
-                cluster["action"] = action
-                cluster["updated_at"] = now
-                changes += 1
-        else:
-            clusters[_UNSCORED_NAME] = {
-                "name": _UNSCORED_NAME,
-                "description": description,
-                "finding_ids": unscored_queue_ids,
-                "created_at": now,
-                "updated_at": now,
-                "auto": True,
-                "cluster_key": _UNSCORED_KEY,
-                "action": action,
-                "user_modified": False,
-            }
-            existing_by_key[_UNSCORED_KEY] = _UNSCORED_NAME
-            changes += 1
-
-        overrides = plan.get("overrides", {})
-        current_name = existing_by_key.get(_UNSCORED_KEY, _UNSCORED_NAME)
-        for fid in unscored_queue_ids:
-            if fid not in overrides:
-                overrides[fid] = {"finding_id": fid, "created_at": now}
-            overrides[fid]["cluster"] = current_name
-            overrides[fid]["updated_at"] = now
+        changes += _sync_auto_cluster(
+            plan, clusters, existing_by_key,
+            cluster_key=_UNSCORED_KEY,
+            cluster_name=_UNSCORED_NAME,
+            member_ids=unscored_queue_ids,
+            description=description,
+            action=action,
+            now=now,
+        )
 
     # -- Stale review cluster (previously scored, min size 2) --------------
     if len(stale_queue_ids) >= _MIN_CLUSTER_SIZE:
@@ -402,44 +456,97 @@ def auto_cluster_findings(plan: PlanModel, state: StateModel) -> int:
         action = (
             "desloppify review --prepare --dimensions "
             + ",".join(cli_keys)
-            + " --force-review-rerun"
+        )
+        changes += _sync_auto_cluster(
+            plan, clusters, existing_by_key,
+            cluster_key=_STALE_KEY,
+            cluster_name=_STALE_NAME,
+            member_ids=stale_queue_ids,
+            description=description,
+            action=action,
+            now=now,
         )
 
-        existing_name = existing_by_key.get(_STALE_KEY)
-        if existing_name and existing_name in clusters:
-            cluster = clusters[existing_name]
-            old_ids = set(cluster.get("finding_ids", []))
-            new_ids = set(stale_queue_ids)
-            if old_ids != new_ids or cluster.get("description") != description or cluster.get("action") != action:
-                cluster["finding_ids"] = stale_queue_ids
-                cluster["description"] = description
-                cluster["action"] = action
-                cluster["updated_at"] = now
-                changes += 1
-        else:
-            clusters[_STALE_NAME] = {
-                "name": _STALE_NAME,
-                "description": description,
-                "finding_ids": stale_queue_ids,
-                "created_at": now,
-                "updated_at": now,
-                "auto": True,
-                "cluster_key": _STALE_KEY,
-                "action": action,
-                "user_modified": False,
-            }
-            existing_by_key[_STALE_KEY] = _STALE_NAME
+    # -- Under-target review cluster (optional, current but below target) ----
+    under_target_ids = current_under_target_ids(state, target_strict=target_strict)
+    under_target_queue_ids = sorted(under_target_ids)
+
+    # Prune: remove IDs that were previously in the under-target cluster
+    # but are no longer under target (they've improved above threshold).
+    prev_ut_cluster = clusters.get(_UNDER_TARGET_NAME, {})
+    prev_ut_ids = set(prev_ut_cluster.get("finding_ids", []))
+    order = plan.get("queue_order", [])
+    _ut_prune = [
+        fid for fid in prev_ut_ids
+        if fid not in under_target_ids
+        and fid not in stale_state_ids
+        and fid not in unscored_state_ids
+        and fid in order
+    ]
+    for fid in _ut_prune:
+        order.remove(fid)
+        changes += 1
+
+    # Guard: only inject under-target items when no objective findings
+    # remain open — mirror the guard used by sync_stale_dimensions().
+    has_objective_items = any(
+        f.get("status") == "open"
+        and f.get("detector") not in NON_OBJECTIVE_DETECTORS
+        and not f.get("suppressed")
+        for f in findings.values()
+    )
+
+    if not has_objective_items and len(under_target_queue_ids) >= _MIN_CLUSTER_SIZE:
+        active_auto_keys.add(_UNDER_TARGET_KEY)
+        cli_keys = [fid.removeprefix(SUBJECTIVE_PREFIX) for fid in under_target_queue_ids]
+        description = (
+            f"Consider re-reviewing {len(under_target_queue_ids)} "
+            f"dimensions under target score"
+        )
+        action = (
+            "desloppify review --prepare --dimensions "
+            + ",".join(cli_keys)
+        )
+        changes += _sync_auto_cluster(
+            plan, clusters, existing_by_key,
+            cluster_key=_UNDER_TARGET_KEY,
+            cluster_name=_UNDER_TARGET_NAME,
+            member_ids=under_target_queue_ids,
+            description=description,
+            action=action,
+            now=now,
+            optional=True,
+        )
+
+        # Ensure under-target IDs are in queue_order (at the back)
+        order = plan.get("queue_order", [])
+        existing_order = set(order)
+        for fid in under_target_queue_ids:
+            if fid not in existing_order:
+                order.append(fid)
+
+    # Evict under-target IDs from queue when objective backlog has returned.
+    if has_objective_items:
+        _objective_evict = [
+            fid for fid in order
+            if fid in under_target_ids
+        ]
+        for fid in _objective_evict:
+            order.remove(fid)
             changes += 1
 
-        overrides = plan.get("overrides", {})
-        current_name = existing_by_key.get(_STALE_KEY, _STALE_NAME)
-        for fid in stale_queue_ids:
-            if fid not in overrides:
-                overrides[fid] = {"finding_id": fid, "created_at": now}
-            overrides[fid]["cluster"] = current_name
-            overrides[fid]["updated_at"] = now
+    return changes
 
-    # Delete stale auto-clusters (no matching group, not user_modified)
+
+def _prune_stale_clusters(
+    plan: PlanModel,
+    findings: dict,
+    clusters: dict,
+    active_auto_keys: set[str],
+    now: str,
+) -> int:
+    """Delete auto-clusters that no longer have matching groups."""
+    changes = 0
     for name in list(clusters.keys()):
         cluster = clusters[name]
         if not cluster.get("auto"):
@@ -469,6 +576,47 @@ def auto_cluster_findings(plan: PlanModel, state: StateModel) -> int:
         if plan.get("active_cluster") == name:
             plan["active_cluster"] = None
         changes += 1
+    return changes
+
+
+def auto_cluster_findings(
+    plan: PlanModel,
+    state: StateModel,
+    *,
+    target_strict: float = 95.0,
+) -> int:
+    """Regenerate auto-clusters from current open findings.
+
+    Returns count of changes made (clusters created, updated, or deleted).
+    """
+    ensure_plan_defaults(plan)
+
+    findings = state.get("findings", {})
+    clusters = plan.get("clusters", {})
+
+    # Map existing auto-clusters by cluster_key
+    existing_by_key: dict[str, str] = {}  # cluster_key → cluster_name
+    for name, cluster in list(clusters.items()):
+        if cluster.get("auto"):
+            ck = cluster.get("cluster_key", "")
+            if ck:
+                existing_by_key[ck] = name
+
+    now = utc_now()
+    active_auto_keys: set[str] = set()
+    changes = 0
+
+    changes += _sync_finding_clusters(
+        plan, findings, clusters, existing_by_key, active_auto_keys, now,
+    )
+    changes += _sync_subjective_clusters(
+        plan, state, findings, clusters, existing_by_key, active_auto_keys, now,
+        target_strict=target_strict,
+    )
+    changes += _prune_stale_clusters(
+        plan, findings, clusters, active_auto_keys, now,
+    )
+    changes += _repair_ghost_cluster_refs(plan, now)
 
     plan["updated"] = now
     return changes

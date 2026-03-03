@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from desloppify.core._internal.text_utils import get_project_root
+from desloppify.core.text_api import get_project_root
 from desloppify.core.runtime_state import current_runtime_context
 
 

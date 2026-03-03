@@ -7,6 +7,7 @@ import math
 import shlex
 import sys
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from desloppify.intelligence.review.feedback_contract import (
@@ -14,6 +15,7 @@ from desloppify.intelligence.review.feedback_contract import (
     REVIEW_QUALITY_HIGH_SCORE_MISSING_ISSUES_KEY,
 )
 from desloppify.intelligence.review.dimensions.data import load_dimensions_for_lang
+from .runtime.policy import resolve_batch_run_policy
 
 
 def _validate_runner(runner: str, *, colorize_fn) -> None:
@@ -125,9 +127,6 @@ def _collect_reviewed_files_from_batches(
             seen.add(path)
             reviewed.append(path)
     return reviewed
-
-
-from .runtime.policy import resolve_batch_run_policy
 
 
 def _normalize_dimension_list(raw: object) -> list[str]:
@@ -260,6 +259,153 @@ def _print_import_dimension_coverage_notice(
     return missing_dims
 
 
+def _append_run_log_line(run_log_path: Path, message: str) -> None:
+    """Append one timestamped line to the run log (best effort)."""
+    line = f"{datetime.now(UTC).isoformat(timespec='seconds')} {message}\n"
+    try:
+        with run_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError:
+        return
+
+
+def _run_batch_prompt(
+    *,
+    prompt: str,
+    output_file: Path,
+    log_file: Path,
+    project_root: Path,
+    run_codex_batch_fn,
+) -> int:
+    """Execute one batch prompt via the injected runner function."""
+    return run_codex_batch_fn(
+        prompt=prompt,
+        repo_root=project_root,
+        output_file=output_file,
+        log_file=log_file,
+    )
+
+
+def _run_batch_task(
+    *,
+    batch_index: int,
+    prompt_path: Path,
+    output_path: Path,
+    log_path: Path,
+    project_root: Path,
+    run_codex_batch_fn,
+) -> int:
+    """Read one prompt artifact and execute its runner task."""
+    try:
+        prompt = prompt_path.read_text()
+    except OSError as exc:
+        raise RuntimeError(
+            f"unable to read prompt for batch #{batch_index + 1}: {prompt_path}"
+        ) from exc
+    return _run_batch_prompt(
+        prompt=prompt,
+        output_file=output_path,
+        log_file=log_path,
+        project_root=project_root,
+        run_codex_batch_fn=run_codex_batch_fn,
+    )
+
+
+def _build_batch_tasks(
+    *,
+    selected_indexes: list[int],
+    prompt_files: dict[int, Path],
+    output_files: dict[int, Path],
+    log_files: dict[int, Path],
+    project_root: Path,
+    run_codex_batch_fn,
+) -> dict[int, object]:
+    """Build index→callable task map for execute_batches."""
+    tasks: dict[int, object] = {}
+    for batch_index in selected_indexes:
+        tasks[batch_index] = partial(
+            _run_batch_task,
+            batch_index=batch_index,
+            prompt_path=prompt_files[batch_index],
+            output_path=output_files[batch_index],
+            log_path=log_files[batch_index],
+            project_root=project_root,
+            run_codex_batch_fn=run_codex_batch_fn,
+        )
+    return tasks
+
+
+def _record_execution_issue(append_run_log_fn, batch_index: int, exc: Exception) -> None:
+    """Record one execute_batches callback/task failure in run.log."""
+    if batch_index < 0:
+        append_run_log_fn(f"execution-error heartbeat error={exc}")
+        return
+    append_run_log_fn(f"execution-error batch={batch_index + 1} error={exc}")
+
+
+def _write_run_summary(
+    *,
+    run_summary_path: Path,
+    summary_created_at: str,
+    stamp: str,
+    runner: str,
+    run_parallel: bool,
+    selected_indexes: list[int],
+    successful_batches: list[int],
+    failed_batches: list[int],
+    allow_partial: bool,
+    max_parallel_batches: int,
+    batch_timeout_seconds: int,
+    batch_max_retries: int,
+    batch_retry_backoff_seconds: float,
+    heartbeat_seconds: float,
+    stall_warning_seconds: int,
+    stall_kill_seconds: int,
+    immutable_packet_path: Path,
+    prompt_packet_path: Path,
+    run_dir: Path,
+    logs_dir: Path,
+    run_log_path: Path,
+    batch_status: dict[str, dict[str, object]],
+    safe_write_text_fn,
+    colorize_fn,
+    append_run_log_fn,
+    interrupted: bool = False,
+    interruption_reason: str | None = None,
+) -> None:
+    """Write run_summary.json and emit a trace line to run.log."""
+    run_summary: dict[str, object] = {
+        "created_at": summary_created_at,
+        "run_stamp": stamp,
+        "runner": runner,
+        "parallel": run_parallel,
+        "selected_batches": [idx + 1 for idx in selected_indexes],
+        "successful_batches": successful_batches,
+        "failed_batches": failed_batches,
+        "allow_partial": allow_partial,
+        "max_parallel_batches": max_parallel_batches if run_parallel else 1,
+        "batch_timeout_seconds": batch_timeout_seconds,
+        "batch_max_retries": batch_max_retries,
+        "batch_retry_backoff_seconds": batch_retry_backoff_seconds,
+        "batch_heartbeat_seconds": heartbeat_seconds if run_parallel else None,
+        "batch_stall_warning_seconds": stall_warning_seconds if run_parallel else None,
+        "batch_stall_kill_seconds": stall_kill_seconds,
+        "immutable_packet": str(immutable_packet_path),
+        "blind_packet": str(prompt_packet_path),
+        "run_dir": str(run_dir),
+        "logs_dir": str(logs_dir),
+        "run_log": str(run_log_path),
+        "batches": batch_status,
+    }
+    if interrupted:
+        run_summary["interrupted"] = True
+        if interruption_reason:
+            run_summary["interruption_reason"] = interruption_reason
+    safe_write_text_fn(run_summary_path, json.dumps(run_summary, indent=2) + "\n")
+    print(colorize_fn(f"  Run summary: {run_summary_path}", "dim"))
+    append_run_log_fn(f"run-summary {run_summary_path}")
+
+
 def do_run_batches(
     args,
     state,
@@ -361,16 +507,9 @@ def do_run_batches(
     else:
         run_log_path = run_dir / "run.log"
     run_log_path.parent.mkdir(parents=True, exist_ok=True)
+    append_run_log = partial(_append_run_log_line, run_log_path)
 
-    def _append_run_log(message: str) -> None:
-        line = f"{datetime.now(UTC).isoformat(timespec='seconds')} {message}\n"
-        try:
-            with run_log_path.open("a", encoding="utf-8") as handle:
-                handle.write(line)
-        except OSError:
-            return
-
-    _append_run_log(
+    append_run_log(
         "run-start "
         f"runner={runner} parallel={run_parallel} max_parallel={max_parallel_batches} "
         f"timeout={batch_timeout_seconds}s heartbeat={heartbeat_seconds:.1f}s "
@@ -379,9 +518,9 @@ def do_run_batches(
         f"retry_backoff={batch_retry_backoff_seconds:.1f}s upper_bound={worst_case_minutes}m "
         f"selected={[idx + 1 for idx in selected_indexes]}"
     )
-    _append_run_log(f"run-path {run_dir}")
-    _append_run_log(f"packet {immutable_packet_path}")
-    _append_run_log(f"blind-packet {prompt_packet_path}")
+    append_run_log(f"run-path {run_dir}")
+    append_run_log(f"packet {immutable_packet_path}")
+    append_run_log(f"blind-packet {prompt_packet_path}")
     print(colorize_fn(f"  Live run log: {run_log_path}", "dim"))
 
     if getattr(args, "dry_run", False):
@@ -393,34 +532,16 @@ def do_run_batches(
         print(colorize_fn(f"  Immutable packet: {immutable_packet_path}", "dim"))
         print(colorize_fn(f"  Blind packet: {prompt_packet_path}", "dim"))
         print(colorize_fn(f"  Prompts: {run_dir / 'prompts'}", "dim"))
-        _append_run_log("run-finished dry-run")
+        append_run_log("run-finished dry-run")
         return
-
-    def _run_batch(*, prompt: str, output_file: Path, log_file: Path) -> int:
-        return run_codex_batch_fn(
-            prompt=prompt,
-            repo_root=project_root,
-            output_file=output_file,
-            log_file=log_file,
-        )
-
-    def _make_task(batch_index: int):
-        prompt_path = prompt_files[batch_index]
-        output_path = output_files[batch_index]
-        log_path = log_files[batch_index]
-
-        def _task() -> int:
-            try:
-                prompt = prompt_path.read_text()
-            except OSError as exc:
-                raise RuntimeError(
-                    f"unable to read prompt for batch #{batch_index + 1}: {prompt_path}"
-                ) from exc
-            return _run_batch(prompt=prompt, output_file=output_path, log_file=log_path)
-
-        return _task
-
-    tasks = {idx: _make_task(idx) for idx in selected_indexes}
+    tasks = _build_batch_tasks(
+        selected_indexes=selected_indexes,
+        prompt_files=prompt_files,
+        output_files=output_files,
+        log_files=log_files,
+        project_root=project_root,
+        run_codex_batch_fn=run_codex_batch_fn,
+    )
 
     batch_positions = {batch_idx: pos + 1 for pos, batch_idx in enumerate(selected_indexes)}
     summary_created_at = datetime.now(UTC).isoformat(timespec="seconds")
@@ -482,7 +603,7 @@ def do_run_batches(
                     "dim",
                 )
             )
-            _append_run_log(
+            append_run_log(
                 "heartbeat "
                 f"active={[idx + 1 for idx in active]} queued={[idx + 1 for idx in queued]} "
                 f"elapsed={{{', '.join(f'{idx + 1}:{elapsed.get(idx, 0)}' for idx in active)}}}"
@@ -504,7 +625,7 @@ def do_run_batches(
                         "This may be normal for long runs; review run.log and batch logs."
                     )
                     print(colorize_fn(warning_message, "yellow"))
-                    _append_run_log(
+                    append_run_log(
                         "stall-warning "
                         f"threshold={stall_warning_seconds}s batches={[idx + 1 for idx in sorted(newly_warned)]}"
                     )
@@ -530,7 +651,7 @@ def do_run_batches(
                     "dim",
                 )
             )
-            _append_run_log(f"batch-queued batch={batch_index + 1} position={position}/{total_batches}")
+            append_run_log(f"batch-queued batch={batch_index + 1} position={position}/{total_batches}")
             return
         if event == "start":
             state["status"] = "running"
@@ -541,7 +662,7 @@ def do_run_batches(
                     "dim",
                 )
             )
-            _append_run_log(f"batch-start batch={batch_index + 1} position={position}/{total_batches}")
+            append_run_log(f"batch-start batch={batch_index + 1} position={position}/{total_batches}")
             return
         if event == "done":
             status = "done" if code == 0 else f"failed ({code})"
@@ -562,63 +683,46 @@ def do_run_batches(
                     tone,
                 )
             )
-            _append_run_log(
+            append_run_log(
                 f"batch-done batch={batch_index + 1} position={position}/{total_batches} "
                 f"code={code} elapsed={state.get('elapsed_seconds', 0)}"
             )
 
-    def _record_execution_issue(batch_index: int, exc: Exception) -> None:
-        if batch_index < 0:
-            _append_run_log(f"execution-error heartbeat error={exc}")
-            return
-        _append_run_log(f"execution-error batch={batch_index + 1} error={exc}")
-
+    record_execution_issue = partial(_record_execution_issue, append_run_log)
     run_summary_path = run_dir / "run_summary.json"
-
-    def _write_run_summary(
-        *,
-        successful_batches: list[int],
-        failed_batches: list[int],
-        interrupted: bool = False,
-        interruption_reason: str | None = None,
-    ) -> None:
-        run_summary: dict[str, object] = {
-            "created_at": summary_created_at,
-            "run_stamp": stamp,
-            "runner": runner,
-            "parallel": run_parallel,
-            "selected_batches": [idx + 1 for idx in selected_indexes],
-            "successful_batches": successful_batches,
-            "failed_batches": failed_batches,
-            "allow_partial": allow_partial,
-            "max_parallel_batches": max_parallel_batches if run_parallel else 1,
-            "batch_timeout_seconds": batch_timeout_seconds,
-            "batch_max_retries": batch_max_retries,
-            "batch_retry_backoff_seconds": batch_retry_backoff_seconds,
-            "batch_heartbeat_seconds": heartbeat_seconds if run_parallel else None,
-            "batch_stall_warning_seconds": stall_warning_seconds if run_parallel else None,
-            "batch_stall_kill_seconds": stall_kill_seconds,
-            "immutable_packet": str(immutable_packet_path),
-            "blind_packet": str(prompt_packet_path),
-            "run_dir": str(run_dir),
-            "logs_dir": str(logs_dir),
-            "run_log": str(run_log_path),
-            "batches": batch_status,
-        }
-        if interrupted:
-            run_summary["interrupted"] = True
-            if interruption_reason:
-                run_summary["interruption_reason"] = interruption_reason
-        safe_write_text_fn(run_summary_path, json.dumps(run_summary, indent=2) + "\n")
-        print(colorize_fn(f"  Run summary: {run_summary_path}", "dim"))
-        _append_run_log(f"run-summary {run_summary_path}")
+    write_run_summary = partial(
+        _write_run_summary,
+        run_summary_path=run_summary_path,
+        summary_created_at=summary_created_at,
+        stamp=stamp,
+        runner=runner,
+        run_parallel=run_parallel,
+        selected_indexes=selected_indexes,
+        allow_partial=allow_partial,
+        max_parallel_batches=max_parallel_batches,
+        batch_timeout_seconds=batch_timeout_seconds,
+        batch_max_retries=batch_max_retries,
+        batch_retry_backoff_seconds=batch_retry_backoff_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+        stall_warning_seconds=stall_warning_seconds,
+        stall_kill_seconds=stall_kill_seconds,
+        immutable_packet_path=immutable_packet_path,
+        prompt_packet_path=prompt_packet_path,
+        run_dir=run_dir,
+        logs_dir=logs_dir,
+        run_log_path=run_log_path,
+        batch_status=batch_status,
+        safe_write_text_fn=safe_write_text_fn,
+        colorize_fn=colorize_fn,
+        append_run_log_fn=append_run_log,
+    )
 
     try:
         execution_failures = execute_batches_fn(
             tasks=tasks,
             run_parallel=run_parallel,
             progress_fn=_report_progress,
-            error_log_fn=_record_execution_issue,
+            error_log_fn=record_execution_issue,
             max_parallel_workers=max_parallel_batches,
             heartbeat_seconds=heartbeat_seconds,
         )
@@ -631,13 +735,13 @@ def do_run_batches(
             )
             if state.get("status") in {"pending", "queued", "running"}:
                 state["status"] = "interrupted"
-        _write_run_summary(
+        write_run_summary(
             successful_batches=[],
             failed_batches=[],
             interrupted=True,
             interruption_reason="keyboard_interrupt",
         )
-        _append_run_log("run-interrupted reason=keyboard_interrupt")
+        append_run_log("run-interrupted reason=keyboard_interrupt")
         raise SystemExit(130) from None
 
     allowed_dims = {
@@ -670,13 +774,13 @@ def do_run_batches(
             continue
         state["status"] = "parse_failed"
 
-    _write_run_summary(
+    write_run_summary(
         successful_batches=[idx + 1 for idx in successful_indexes],
         failed_batches=[idx + 1 for idx in sorted(failure_set)],
     )
 
     if failures and (not allow_partial or not batch_results):
-        _append_run_log(
+        append_run_log(
             f"run-finished failures={[idx + 1 for idx in sorted(failure_set)]} mode=exit"
         )
         print_failures_and_exit_fn(
@@ -698,7 +802,7 @@ def do_run_batches(
             logs_dir=logs_dir,
             colorize_fn=colorize_fn,
         )
-        _append_run_log(
+        append_run_log(
             "run-partial "
             f"successful={[idx + 1 for idx in successful_indexes]} "
             f"failed={[idx + 1 for idx in sorted(failure_set)]}"
@@ -782,12 +886,12 @@ def do_run_batches(
             trusted_assessment_label="trusted internal run-batches import",
         )
     except SystemExit as exc:
-        _append_run_log(f"run-finished import-failed code={exc.code}")
+        append_run_log(f"run-finished import-failed code={exc.code}")
         raise
     except Exception as exc:
-        _append_run_log(f"run-finished import-error error={exc}")
+        append_run_log(f"run-finished import-error error={exc}")
         raise
-    _append_run_log(
+    append_run_log(
         "run-finished "
         f"successful={[idx + 1 for idx in successful_indexes]} "
         f"failed={[idx + 1 for idx in sorted(failure_set)]} imported={str(merged_path)}"

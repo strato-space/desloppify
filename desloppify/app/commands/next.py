@@ -10,10 +10,11 @@ import desloppify.app.commands.next_parts.render as next_render_mod
 from desloppify.app.commands.helpers.lang import resolve_lang
 from desloppify.app.commands.helpers.query import write_query
 from desloppify.app.commands.helpers.queue_progress import (
+    QueueBreakdown,
     get_plan_start_strict,
-    plan_aware_queue_count,
+    plan_aware_queue_breakdown,
 )
-from desloppify.app.commands.helpers.guardrails import print_synthesis_guardrail_banner
+from desloppify.app.commands.helpers.guardrails import print_triage_guardrail_info
 from desloppify.app.commands.helpers.runtime import command_runtime
 from desloppify.app.commands.helpers.score import target_strict_score_from_config
 from desloppify.app.commands.helpers.state import require_completed_scan
@@ -28,7 +29,7 @@ from desloppify.engine.work_queue import (
 from desloppify.core.exception_sets import PLAN_LOAD_EXCEPTIONS
 from desloppify.core.output_api import colorize
 from desloppify.core.skill_docs import check_skill_version
-from desloppify.core.tooling import check_config_staleness, check_tool_staleness
+from desloppify.core.tooling import check_config_staleness
 from desloppify.core.discovery_api import safe_write_text
 from desloppify.intelligence.narrative import NarrativeContext, compute_narrative
 from desloppify.scoring import merge_potentials
@@ -74,9 +75,6 @@ def cmd_next(args: argparse.Namespace) -> None:
     if not require_completed_scan(state):
         return
 
-    stale_warning = check_tool_staleness(state)
-    if stale_warning:
-        print(colorize(f"  {stale_warning}", "yellow"))
     skill_warning = check_skill_version()
     if skill_warning:
         print(colorize(f"  {skill_warning}", "yellow"))
@@ -84,7 +82,7 @@ def cmd_next(args: argparse.Namespace) -> None:
     if config_warning:
         print(colorize(f"  {config_warning}", "yellow"))
 
-    print_synthesis_guardrail_banner()
+    print_triage_guardrail_info(state=state)
     _get_items(args, state, config)
 
 
@@ -153,15 +151,13 @@ def _plan_queue_context(
     *,
     state: dict,
     plan_data: dict | None,
-) -> tuple[float | None, int]:
+) -> tuple[float | None, QueueBreakdown | None]:
     plan_start_strict = get_plan_start_strict(plan_data)
-    if plan_start_strict is None:
-        return None, 0
     try:
-        queue_total = plan_aware_queue_count(state, plan_data)
+        breakdown = plan_aware_queue_breakdown(state, plan_data)
     except PLAN_LOAD_EXCEPTIONS:
-        queue_total = 0
-    return plan_start_strict, queue_total
+        breakdown = None
+    return plan_start_strict, breakdown
 
 
 def _merge_potentials_safe(raw_potentials: dict | None) -> dict | None:
@@ -172,13 +168,11 @@ def _merge_potentials_safe(raw_potentials: dict | None) -> dict | None:
 
 
 def _get_items(args, state: dict, config: dict) -> None:
-    tier = getattr(args, "tier", None)
     count = getattr(args, "count", 1) or 1
     scope = getattr(args, "scope", None)
     status = getattr(args, "status", "open")
     group = getattr(args, "group", "item")
     explain = bool(getattr(args, "explain", False))
-    no_tier_fallback = bool(getattr(args, "no_tier_fallback", False))
     cluster_arg = getattr(args, "cluster", None)
     include_skipped = bool(getattr(args, "include_skipped", False))
 
@@ -204,14 +198,12 @@ def _get_items(args, state: dict, config: dict) -> None:
     queue = build_work_queue(
         state,
         options=QueueBuildOptions(
-            tier=tier,
             count=count,
             scan_path=state.get("scan_path"),
             scope=scope,
             status=status,
             include_subjective=True,
             subjective_threshold=target_strict,
-            no_tier_fallback=no_tier_fallback,
             explain=explain,
             plan=plan_data,
             include_skipped=include_skipped,
@@ -239,28 +231,29 @@ def _get_items(args, state: dict, config: dict) -> None:
     if _emit_requested_output(args, payload, items):
         return
 
-    # Extract frozen plan-start score and queue total for lifecycle display
-    plan_start_strict, queue_total = _plan_queue_context(
+    dim_scores = state.get("dimension_scores", {})
+    findings_scoped = state_mod.path_scoped_findings(
+        state.get("findings", {}),
+        state.get("scan_path"),
+    )
+
+    # Extract frozen plan-start score and queue breakdown for lifecycle display
+    plan_start_strict, breakdown = _plan_queue_context(
         state=state,
         plan_data=plan_data,
     )
+    queue_total = breakdown.queue_total if breakdown else 0
 
     next_render_mod.render_queue_header(queue, explain)
     strict_score = state_mod.get_strict_score(state)
     if next_render_mod.show_empty_queue(
         queue,
-        tier,
         strict_score,
         plan_start_strict=plan_start_strict,
         target_strict=target_strict,
     ):
         return
 
-    dim_scores = state.get("dimension_scores", {})
-    findings_scoped = state_mod.path_scoped_findings(
-        state.get("findings", {}),
-        state.get("scan_path"),
-    )
     raw_potentials = state.get("potentials", {})
     potentials = _merge_potentials_safe(raw_potentials)
     next_render_mod.render_terminal_items(
@@ -269,6 +262,7 @@ def _get_items(args, state: dict, config: dict) -> None:
         cluster_filter=effective_cluster,
     )
     next_render_mod.render_single_item_resolution_hint(items)
+    next_render_mod.render_uncommitted_reminder(plan_data)
     next_render_mod.render_followup_nudges(
         state,
         dim_scores,
@@ -277,6 +271,7 @@ def _get_items(args, state: dict, config: dict) -> None:
         target_strict_score=target_strict,
         queue_total=queue_total,
         plan_start_strict=plan_start_strict,
+        breakdown=breakdown,
     )
     print()
 

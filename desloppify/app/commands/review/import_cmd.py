@@ -5,6 +5,10 @@ from __future__ import annotations
 import copy
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from desloppify.engine._plan.reconcile import ReviewImportSyncResult
 
 from desloppify import state as state_mod
 from desloppify.app.commands.helpers.query import write_query
@@ -27,6 +31,8 @@ from desloppify.intelligence.review.importing.contracts import (
     AssessmentImportPolicyModel,
     ReviewImportPayload,
 )
+from desloppify.app.commands.helpers.display import short_finding_id
+from desloppify.core.exception_sets import PLAN_LOAD_EXCEPTIONS
 from desloppify.core.output_api import colorize
 
 _SCORECARD_SUBJECTIVE_AT_TARGET = bind_scorecard_subjective_at_target(
@@ -127,6 +133,106 @@ def _clear_provisional_override_flags(
         if payload.get("source") == "manual_override":
             payload["source"] = "holistic"
     return cleared
+
+
+
+def _print_review_import_sync(state: dict, result: ReviewImportSyncResult) -> None:
+    """Print summary of plan changes after review import sync."""
+    new_ids = result.new_ids
+    print(colorize(
+        f"\n  Plan updated: {len(new_ids)} new review finding(s) added to queue.",
+        "bold",
+    ))
+    findings = state.get("findings", {})
+    for fid in sorted(new_ids)[:10]:
+        f = findings.get(fid, {})
+        print(f"    * [{short_finding_id(fid)}] {f.get('summary', '')}")
+    if len(new_ids) > 10:
+        print(colorize(f"    ... and {len(new_ids) - 10} more", "dim"))
+    print()
+    print(colorize("  New items added to end of queue.", "dim"))
+    print()
+    print(colorize("  View queue:            desloppify plan queue", "dim"))
+    print(colorize("  View newest first:     desloppify plan queue --sort recent", "dim"))
+    print()
+    print(colorize("  NEXT STEP:  desloppify plan triage", "yellow"))
+    print(colorize(
+        "  (Review new findings and decide whether to re-plan or accept current queue.)",
+        "dim",
+    ))
+
+
+def _sync_plan_after_review_change(state: dict, diff: dict) -> None:
+    """Best-effort: sync living plan after review import introduces new findings.
+
+    Also auto-resolves subjective dimension queue items that were covered
+    by this import and injects ``workflow::create-plan`` when all initial
+    reviews are complete.
+    """
+    try:
+        from desloppify.engine.plan import (
+            append_log_entry,
+            has_living_plan,
+            load_plan,
+            purge_ids,
+            save_plan,
+            sync_create_plan_needed,
+            sync_plan_after_review_import,
+        )
+
+        if not has_living_plan():
+            return
+
+        plan = load_plan()
+        result = sync_plan_after_review_import(plan, state)
+
+        # Auto-resolve subjective dimension items that are no longer unscored
+        from desloppify.engine._plan.stale_dimensions import current_unscored_ids
+        still_unscored = current_unscored_ids(state)
+        order = plan.get("queue_order", [])
+        subjective_in_queue = [
+            fid for fid in order if fid.startswith("subjective::")
+        ]
+        covered_ids = [
+            fid for fid in subjective_in_queue
+            if fid not in still_unscored
+        ]
+        if covered_ids:
+            purge_ids(plan, covered_ids)
+
+        # Check if create-plan item should be injected
+        create_plan_result = sync_create_plan_needed(plan, state)
+        if create_plan_result.injected:
+            print(colorize(
+                "  Plan: reviews complete — `workflow::create-plan` queued. Run `desloppify plan`.",
+                "cyan",
+            ))
+
+        if result is not None:
+            append_log_entry(
+                plan,
+                "review_import_sync",
+                actor="system",
+                detail={
+                    "trigger": "review_import",
+                    "new_ids": sorted(result.new_ids),
+                    "added_to_queue": result.added_to_queue,
+                    "diff_new": diff.get("new", 0),
+                    "diff_reopened": diff.get("reopened", 0),
+                    "covered_subjective": covered_ids,
+                },
+            )
+
+        save_plan(plan)
+        if result is not None:
+            _print_review_import_sync(state, result)
+    except PLAN_LOAD_EXCEPTIONS as exc:
+        print(
+            colorize(
+                f"  Note: skipped plan sync after review import ({exc}).",
+                "dim",
+            )
+        )
 
 
 def do_import(
@@ -267,7 +373,34 @@ def do_import(
     state.update(working_state)
     state_mod.save_state(state, state_file)
 
-    lang_name = lang.name
+    # Sync living plan when new or reopened findings arrived
+    if int(diff.get("new", 0) or 0) > 0 or int(diff.get("reopened", 0) or 0) > 0:
+        _sync_plan_after_review_change(state, diff)
+
+    _print_import_results(
+        state=state,
+        lang_name=lang.name,
+        config=config,
+        diff=diff,
+        prev=prev,
+        label=label,
+        provisional_count=provisional_count,
+        assessment_policy=assessment_policy,
+    )
+
+
+def _print_import_results(
+    *,
+    state: dict,
+    lang_name: str,
+    config: dict | None,
+    diff: dict,
+    prev: dict,
+    label: str,
+    provisional_count: int,
+    assessment_policy,
+) -> None:
+    """Print import results, scores, and write query.json."""
     narrative = narrative_mod.compute_narrative(
         state, NarrativeContext(lang=lang_name, command="review")
     )
@@ -314,11 +447,11 @@ def do_import(
         )
     )
     write_query(
-            {
-                "command": "review",
-                "action": "import",
-                "mode": "holistic",
-                "diff": diff,
+        {
+            "command": "review",
+            "action": "import",
+            "mode": "holistic",
+            "diff": diff,
             "next_command": next_command,
             "subjective_at_target": [
                 {"dimension": entry["name"], "score": entry["score"]}

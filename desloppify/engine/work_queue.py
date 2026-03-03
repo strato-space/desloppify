@@ -39,14 +39,12 @@ from desloppify.engine._work_queue.issues import (
     update_investigation,
 )
 
-# --- ranking: sort keys, tier counts, grouping -----------------------------
+# --- ranking: sort keys, grouping ------------------------------------------
 from desloppify.engine._work_queue.ranking import (
     build_finding_items,
-    choose_fallback_tier,
     item_explain,
     item_sort_key,
     subjective_score_value,
-    tier_counts,
 )
 
 __all__ = [
@@ -70,11 +68,9 @@ __all__ = [
     "supported_fixers_for_item",
     # ranking
     "build_finding_items",
-    "choose_fallback_tier",
     "item_explain",
     "item_sort_key",
     "subjective_score_value",
-    "tier_counts",
     # issues
     "expire_stale_holistic",
     "impact_label",

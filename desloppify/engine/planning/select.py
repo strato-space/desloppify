@@ -19,16 +19,15 @@ def get_next_items(
 
     Legacy plan API intentionally returns only finding items (not synthetic
     subjective queue items) so existing planner consumers stay stable.
+    The *tier* parameter is accepted for backward compatibility but ignored.
     """
     result = build_work_queue(
         state,
         options=QueueBuildOptions(
-            tier=tier,
             count=count,
             scan_path=scan_path,
             status="open",
             include_subjective=False,
-            no_tier_fallback=True,
         ),
     )
     return [item for item in result["items"] if item.get("kind") == "finding"]

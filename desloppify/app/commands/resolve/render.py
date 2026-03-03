@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
-from desloppify import state as state_mod
 from desloppify.app.commands.helpers.score_update import _print_strict_target_nudge
+from desloppify.app.commands.resolve.render_support import (
+    print_post_resolve_guidance,
+    print_strict_gap_note,
+    score_snapshot_or_warn,
+)
 from desloppify.core.output_api import colorize
 
 
@@ -56,63 +61,6 @@ def _delta_suffix(delta: float) -> str:
     return f" ({'+' if delta > 0 else ''}{delta:.1f})"
 
 
-def _score_snapshot_or_warn(state: dict):
-    snapshot = state_mod.score_snapshot(state)
-    if (
-        snapshot.overall is None
-        or snapshot.objective is None
-        or snapshot.strict is None
-        or snapshot.verified is None
-    ):
-        print(colorize("\n  Scores unavailable — run `desloppify scan`.", "yellow"))
-        return None
-    return snapshot
-
-
-def _print_strict_gap_note(status: str, *, overall: float, strict: float) -> None:
-    if status != "wontfix":
-        return
-    strict_gap = round(overall - strict, 1)
-    if strict_gap <= 0:
-        return
-    print(
-        colorize(
-            f"  Note: wontfix items still count against strict score. "
-            f"Current gap: overall {overall:.1f} vs strict {strict:.1f} ({strict_gap:.1f} pts of hidden debt).",
-            "yellow",
-        )
-    )
-
-
-def _print_post_resolve_guidance(
-    *,
-    status: str,
-    has_review_findings: bool,
-    overall_delta: float,
-) -> None:
-    if has_review_findings and abs(overall_delta) < 0.05:
-        print(
-            colorize(
-                "  Scores unchanged (review findings don't affect scores directly).",
-                "yellow",
-            )
-        )
-        print(
-            colorize(
-                "  Run `desloppify review --prepare` to get updated assessment scores.",
-                "dim",
-            )
-        )
-        return
-    if status == "fixed":
-        print(
-            colorize(
-                "  Verified score updates after a scan confirms the finding disappeared.",
-                "yellow",
-            )
-        )
-
-
 def _print_score_movement(
     *,
     status: str,
@@ -124,7 +72,7 @@ def _print_score_movement(
     has_review_findings: bool = False,
     target_strict: float | None = None,
 ) -> None:
-    new = _score_snapshot_or_warn(state)
+    new = score_snapshot_or_warn(state)
     if new is None:
         return
 
@@ -145,8 +93,8 @@ def _print_score_movement(
     )
     if target_strict is not None:
         _print_strict_target_nudge(new.strict, target_strict, show_next=False)
-    _print_strict_gap_note(status, overall=new.overall, strict=new.strict)
-    _print_post_resolve_guidance(
+    print_strict_gap_note(status, overall=new.overall, strict=new.strict)
+    print_post_resolve_guidance(
         status=status,
         has_review_findings=has_review_findings,
         overall_delta=overall_delta,
@@ -200,6 +148,93 @@ def _print_subjective_reset_hint(
             "dim",
         )
     )
+
+
+def _render_uncommitted_block(uncommitted: list[str], just_resolved: list[str]) -> None:
+    """Print the uncommitted findings section."""
+    count = len(uncommitted)
+    just_set = set(just_resolved)
+    print(f"\n  Uncommitted work ({count} resolved finding{'s' if count != 1 else ''}):")
+    for fid in uncommitted[:5]:
+        marker = colorize("●", "green") if fid in just_set else "○"
+        tag = "  (just now)" if fid in just_set else ""
+        print(f"    {marker} {fid}{tag}")
+    if count > 5:
+        print(f"    ... and {count - 5} more")
+
+
+def _render_committed_block(commit_log: list[dict]) -> None:
+    """Print the already-committed section (last 3 commits)."""
+    if not commit_log:
+        return
+    committed_count = sum(len(r.get("finding_ids", [])) for r in commit_log)
+    nc = len(commit_log)
+    print(f"\n  Already committed ({nc} commit{'s' if nc != 1 else ''}, {committed_count} finding{'s' if committed_count != 1 else ''}):")
+    for record in commit_log[-3:]:
+        sha = record.get("sha", "?")[:7]
+        note = record.get("note", "")
+        fc = len(record.get("finding_ids", []))
+        note_str = f' — "{note}"' if note else ""
+        print(f"    {sha}{note_str} ({fc} finding{'s' if fc != 1 else ''})")
+
+
+def render_commit_guidance(
+    state: dict,
+    plan: dict | None,
+    just_resolved: list[str],
+    status: str,
+) -> None:
+    """Show commit tracking guidance after a resolve."""
+    if status != "fixed" or plan is None:
+        return
+
+    try:
+        from desloppify.core.config import load_config
+
+        config = load_config()
+        if not config.get("commit_tracking_enabled", True):
+            return
+
+        from desloppify.core.git_context import detect_git_context
+        from desloppify.engine.plan import (
+            get_uncommitted_findings,
+            suggest_commit_message,
+        )
+
+        git = detect_git_context()
+        if not git.available:
+            return
+
+        uncommitted = get_uncommitted_findings(plan)
+        if not uncommitted:
+            return
+
+        pr_number = config.get("commit_pr", 0)
+
+        print(colorize("\n  ── Commit Tracking ──────────────────────────", "dim"))
+        print(f"  Branch: {git.branch or '?'}    HEAD: {git.head_sha or '?'}")
+        if pr_number:
+            print(f"  PR: #{pr_number}")
+
+        _render_uncommitted_block(uncommitted, just_resolved)
+        _render_committed_block(plan.get("commit_log", []))
+
+        template = config.get(
+            "commit_message_template",
+            "desloppify: {status} {count} finding(s) — {summary}",
+        )
+        msg = suggest_commit_message(plan, template)
+        if msg:
+            print(f"\n  Suggested commit message:")
+            print(colorize(f'    "{msg}"', "cyan"))
+
+        print(colorize("\n  After committing → `desloppify plan commit-log record`", "dim"))
+        print(colorize("  ─────────────────────────────────────────────", "dim"))
+
+    except (ImportError, OSError, ValueError, KeyError, TypeError):
+        logging.getLogger(__name__).debug(
+            "commit guidance rendering skipped", exc_info=True,
+        )
 
 
 def _print_next_command(state: dict) -> str:

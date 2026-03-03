@@ -13,6 +13,7 @@ from desloppify.core.output_api import colorize
 
 _REQUIRED_ATTESTATION_PHRASES = ("i have actually", "not gaming")
 _ATTESTATION_KEYWORD_HINT = ("I have actually", "not gaming")
+_MIN_NOTE_LENGTH = 50
 
 
 def _emit_warning(message: str) -> None:
@@ -63,6 +64,20 @@ def show_attestation_requirement(
         f"Required keywords: '{_ATTESTATION_KEYWORD_HINT[0]}' and '{_ATTESTATION_KEYWORD_HINT[1]}'."
     )
     print(colorize(f'Example: --attest "{example}"', "dim"), file=sys.stderr)
+
+
+def validate_note_length(note: str | None) -> bool:
+    """Return True if the note meets the minimum length requirement."""
+    return note is not None and len(note.strip()) >= _MIN_NOTE_LENGTH
+
+
+def show_note_length_requirement(note: str | None) -> None:
+    """Emit a warning about minimum note length."""
+    current = len((note or "").strip())
+    _emit_warning(
+        f"Note must be at least {_MIN_NOTE_LENGTH} characters (got {current}). "
+        f"Describe what you actually did."
+    )
 
 
 def _validate_resolve_inputs(args: argparse.Namespace, attestation: str | None) -> None:

@@ -86,6 +86,9 @@ def _count_open_subjective_queue_items(
     for item in queue.get("items", []):
         if item.get("kind") != "subjective_dimension":
             continue
+        # Stale reruns are not blocking backlog — they ARE the work
+        if item.get("stale_review"):
+            continue
         if normalized_dims is None:
             count += 1
             continue

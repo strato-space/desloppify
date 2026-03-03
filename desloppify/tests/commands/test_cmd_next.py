@@ -14,14 +14,12 @@ from desloppify.app.commands.next import _low_subjective_dimensions, cmd_next
 
 def _args(**overrides):
     base = {
-        "tier": None,
         "count": 1,
         "scope": None,
         "status": "open",
         "group": "item",
         "format": "terminal",
         "explain": False,
-        "no_tier_fallback": False,
         "output": None,
         "lang": None,
         "path": ".",
@@ -45,7 +43,6 @@ def _patch_common(monkeypatch, *, state, config=None):
             state_path="/tmp/fake-state.json",
         ),
     )
-    monkeypatch.setattr(next_mod, "check_tool_staleness", lambda _state: None)
     monkeypatch.setattr(narrative_mod, "compute_narrative", lambda *a, **k: {})
     monkeypatch.setattr(next_mod, "resolve_lang", lambda _args: None)
     monkeypatch.setattr(plan_mod, "load_plan", lambda: {})
@@ -83,131 +80,6 @@ class TestCmdNextOutput:
         out = capsys.readouterr().out
         assert "No scans yet. Run: desloppify scan" in out
 
-    def test_tier_navigator_always_printed(self, monkeypatch, capsys):
-        written = []
-        _patch_common(
-            monkeypatch,
-            state={
-                "findings": {},
-                "dimension_scores": {},
-                "overall_score": 100.0,
-                "objective_score": 100.0,
-                "strict_score": 100.0,
-                "scan_path": ".",
-            },
-        )
-        monkeypatch.setattr(
-            next_mod, "write_query", lambda payload: written.append(payload)
-        )
-        monkeypatch.setattr(
-            next_mod,
-            "build_work_queue",
-            lambda *_a, **_k: {
-                "items": [],
-                "total": 0,
-                "tier_counts": {1: 0, 2: 0, 3: 0, 4: 0},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [],
-            },
-        )
-
-        cmd_next(_args())
-        out = capsys.readouterr().out
-        assert "Tier Navigator" in out
-        assert "desloppify next --tier 1" in out
-        assert "Nothing to do" in out
-        assert written[0]["command"] == "next"
-        assert written[0]["items"] == []
-
-    def test_tier_fallback_message_and_payload(self, monkeypatch, capsys):
-        written = []
-        _patch_common(
-            monkeypatch,
-            state={
-                "findings": {},
-                "dimension_scores": {},
-                "overall_score": 96.0,
-                "objective_score": 96.0,
-                "strict_score": 96.0,
-                "scan_path": ".",
-            },
-        )
-        monkeypatch.setattr(
-            next_mod, "write_query", lambda payload: written.append(payload)
-        )
-        monkeypatch.setattr(
-            next_mod,
-            "build_work_queue",
-            lambda *_a, **_k: {
-                "items": [
-                    {
-                        "id": "smells::src/a.py::x",
-                        "kind": "finding",
-                        "tier": 2,
-                        "effective_tier": 2,
-                        "confidence": "high",
-                        "detector": "smells",
-                        "file": "src/a.py",
-                        "summary": "Thing to fix",
-                        "detail": {},
-                        "status": "open",
-                        "primary_command": "desloppify plan done ...",
-                    }
-                ],
-                "total": 1,
-                "tier_counts": {1: 0, 2: 1, 3: 0, 4: 0},
-                "requested_tier": 1,
-                "selected_tier": 2,
-                "fallback_reason": "Requested T1 has 0 open -> showing T2 (nearest non-empty).",
-                "available_tiers": [2],
-            },
-        )
-
-        cmd_next(_args(tier=1))
-        out = capsys.readouterr().out
-        assert "Requested T1 has 0 open -> showing T2 (nearest non-empty)." in out
-        assert written[0]["queue"]["requested_tier"] == 1
-        assert written[0]["queue"]["selected_tier"] == 2
-
-    def test_no_tier_fallback_strict_empty_guidance(self, monkeypatch, capsys):
-        written = []
-        _patch_common(
-            monkeypatch,
-            state={
-                "findings": {},
-                "dimension_scores": {},
-                "overall_score": 97.0,
-                "objective_score": 97.0,
-                "strict_score": 97.0,
-                "scan_path": ".",
-            },
-        )
-        monkeypatch.setattr(
-            next_mod, "write_query", lambda payload: written.append(payload)
-        )
-        monkeypatch.setattr(
-            next_mod,
-            "build_work_queue",
-            lambda *_a, **_k: {
-                "items": [],
-                "total": 0,
-                "tier_counts": {1: 2, 2: 1, 3: 0, 4: 0},
-                "requested_tier": 4,
-                "selected_tier": 4,
-                "fallback_reason": "Requested T4 has 0 open.",
-                "available_tiers": [1, 2],
-            },
-        )
-
-        cmd_next(_args(tier=4, no_tier_fallback=True))
-        out = capsys.readouterr().out
-        assert "Requested T4 has 0 open." in out
-        assert "Requested tier: T4" in out
-        assert "Try: desloppify next --tier 1 | desloppify next --tier 2" in out
-        assert written[0]["queue"]["available_tiers"] == [1, 2]
-
     def test_subjective_focus_and_review_prepare_hint(self, monkeypatch, capsys):
         _patch_common(
             monkeypatch,
@@ -242,8 +114,6 @@ class TestCmdNextOutput:
                     {
                         "id": "smells::src/a.py::x",
                         "kind": "finding",
-                        "tier": 3,
-                        "effective_tier": 3,
                         "confidence": "medium",
                         "detector": "smells",
                         "file": "src/a.py",
@@ -254,11 +124,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 1, 4: 0},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [3],
             },
         )
 
@@ -301,8 +166,6 @@ class TestCmdNextOutput:
                     {
                         "id": "smells::src/a.py::x",
                         "kind": "finding",
-                        "tier": 3,
-                        "effective_tier": 3,
                         "confidence": "medium",
                         "detector": "smells",
                         "file": "src/a.py",
@@ -313,11 +176,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 1, 4: 1},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [3, 4],
             },
         )
 
@@ -358,8 +216,6 @@ class TestCmdNextOutput:
                     {
                         "id": "smells::src/a.py::x",
                         "kind": "finding",
-                        "tier": 3,
-                        "effective_tier": 3,
                         "confidence": "medium",
                         "detector": "smells",
                         "file": "src/a.py",
@@ -370,11 +226,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 1, 4: 0},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [3],
             },
         )
 
@@ -416,8 +267,6 @@ class TestCmdNextOutput:
                     {
                         "id": "smells::src/a.py::x",
                         "kind": "finding",
-                        "tier": 3,
-                        "effective_tier": 3,
                         "confidence": "medium",
                         "detector": "smells",
                         "file": "src/a.py",
@@ -428,11 +277,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 1, 4: 1},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [3, 4],
             },
         )
 
@@ -470,8 +314,6 @@ class TestCmdNextOutput:
                     {
                         "id": "smells::src/a.py::x",
                         "kind": "finding",
-                        "tier": 3,
-                        "effective_tier": 3,
                         "confidence": "medium",
                         "detector": "smells",
                         "file": "src/a.py",
@@ -482,11 +324,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 1, 4: 0},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [3],
             },
         )
 
@@ -538,8 +375,6 @@ class TestCmdNextOutput:
                     {
                         "id": "smells::src/a.py::x",
                         "kind": "finding",
-                        "tier": 3,
-                        "effective_tier": 3,
                         "confidence": "medium",
                         "detector": "smells",
                         "file": "src/a.py",
@@ -550,11 +385,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 1, 4: 0},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [3],
             },
         )
 
@@ -593,8 +423,6 @@ class TestCmdNextOutput:
                     {
                         "id": "subjective::naming_quality",
                         "kind": "subjective_dimension",
-                        "tier": 4,
-                        "effective_tier": 4,
                         "confidence": "medium",
                         "detector": "subjective_assessment",
                         "file": ".",
@@ -609,11 +437,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 0, 4: 1},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [4],
             },
         )
 
@@ -655,8 +478,6 @@ class TestCmdNextOutput:
                     {
                         "id": "smells::src/a.py::x",
                         "kind": "finding",
-                        "tier": 2,
-                        "effective_tier": 2,
                         "confidence": "high",
                         "detector": "smells",
                         "file": "src/a.py",
@@ -667,11 +488,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 1, 3: 0, 4: 0},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [2],
             },
         )
 
@@ -703,8 +519,6 @@ class TestCmdNextOutput:
                     {
                         "id": "subjective::naming_quality",
                         "kind": "subjective_dimension",
-                        "tier": 4,
-                        "effective_tier": 4,
                         "confidence": "medium",
                         "detector": "subjective_assessment",
                         "file": ".",
@@ -716,11 +530,6 @@ class TestCmdNextOutput:
                     }
                 ],
                 "total": 1,
-                "tier_counts": {1: 0, 2: 0, 3: 0, 4: 1},
-                "requested_tier": None,
-                "selected_tier": None,
-                "fallback_reason": None,
-                "available_tiers": [4],
             },
         )
 

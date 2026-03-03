@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from desloppify.app.commands.helpers.lang import auto_detect_lang_name
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.core.output_api import colorize
 
 

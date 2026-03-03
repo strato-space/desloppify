@@ -996,6 +996,32 @@ class TestFsharpImportResolver:
         assert resolve_fsharp_import("Microsoft.FSharp", "/src/main.fs", "/src") is None
 
 
+class TestSwiftImportResolver:
+    def test_local_module_path(self, tmp_path):
+        from desloppify.languages._framework.treesitter._imports import (
+            resolve_swift_import,
+        )
+
+        target = tmp_path / "Sources" / "MyApp" / "Networking" / "Client.swift"
+        target.parent.mkdir(parents=True)
+        target.write_text("import Foundation\n")
+
+        result = resolve_swift_import(
+            "MyApp.Networking.Client",
+            str(tmp_path / "Sources" / "MyApp" / "App.swift"),
+            str(tmp_path),
+        )
+        assert result is not None
+        assert result.endswith("Client.swift")
+
+    def test_external_module_returns_none(self):
+        from desloppify.languages._framework.treesitter._imports import (
+            resolve_swift_import,
+        )
+
+        assert resolve_swift_import("Foundation", "/src/App.swift", "/src") is None
+
+
 class TestJsImportResolver:
     def test_relative_import(self, tmp_path):
         from desloppify.languages._framework.treesitter._imports import (

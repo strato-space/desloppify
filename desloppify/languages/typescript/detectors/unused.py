@@ -12,7 +12,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT, strip_c_style_comments
+from desloppify.core.text_api import PROJECT_ROOT, strip_c_style_comments
 from desloppify.core.discovery_api import (
     find_ts_files,
     read_file_text,

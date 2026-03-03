@@ -185,14 +185,16 @@ def _filter_batches_to_file_scope(
             continue
         batch = dict(raw_batch)
         files_to_read = batch.get("files_to_read", [])
+        scoped_files: list[str]
         if isinstance(files_to_read, list):
-            batch["files_to_read"] = [
+            scoped_files = [
                 filepath
                 for filepath in files_to_read
                 if _file_in_allowed_scope(filepath, allowed_files)
             ]
         else:
-            batch["files_to_read"] = []
+            scoped_files = []
+        batch["files_to_read"] = scoped_files
 
         concern_signals = batch.get("concern_signals", [])
         if isinstance(concern_signals, list):
@@ -458,7 +460,6 @@ def prepare_holistic_review(
         "system_prompt": system_prompt,
         "total_files": context.codebase_stats.get("total_files", 0),
         "workflow": HOLISTIC_WORKFLOW,
-        "investigation_batches": batches,
         "invalid_dimensions": {
             "requested": invalid_requested,
             "default": invalid_default,
@@ -485,5 +486,5 @@ def prepare_holistic_review(
             batches,
             allowed_files=allowed_review_files,
         )
-        payload["investigation_batches"] = batches
+    payload["investigation_batches"] = batches
     return payload

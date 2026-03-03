@@ -64,6 +64,12 @@ def load_all(*, force_reload: bool = False) -> None:
         _report_load_errors_for_load_all()
         return
 
+    # Mark load-attempted early to guard against re-entrancy: if a plugin
+    # import transitively triggers load_all() again (e.g. via get_lang()),
+    # the was_load_attempted() check above will short-circuit instead of
+    # re-importing partially-initialised modules.
+    registry_state.set_load_attempted(True)
+
     lang_dir = Path(__file__).resolve().parent
     if lang_dir.name == "_framework":
         lang_dir = lang_dir.parent
@@ -115,7 +121,6 @@ def load_all(*, force_reload: bool = False) -> None:
     except (OSError, ImportError) as exc:
         logger.debug("User plugin discovery skipped: %s", exc)
 
-    registry_state.set_load_attempted(True)
     registry_state.set_load_errors(failures)
     _report_load_errors_for_load_all()
 

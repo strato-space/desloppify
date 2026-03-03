@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 
+from desloppify.app.commands.helpers.guardrails import print_triage_guardrail_info
 from desloppify.app.commands.helpers.runtime import command_runtime
 from desloppify.app.commands.helpers.state import require_completed_scan
 from desloppify.core.output_api import colorize, print_table
-from desloppify.engine.plan import load_plan
+from desloppify.engine.plan import compute_new_finding_ids, load_plan
 from desloppify.engine.work_queue import QueueBuildOptions, build_work_queue
 
 
@@ -15,18 +16,6 @@ def _truncate(text: str, width: int) -> str:
     if len(text) <= width:
         return text
     return text[: width - 1] + "\u2026"
-
-
-def _cluster_tier_label(item: dict) -> str:
-    """Compute a tier label from cluster members, e.g. 'T2' or 'T1-T3'."""
-    members = item.get("members", [])
-    if not members:
-        return ""
-    tiers = {int(m.get("effective_tier", m.get("tier", 3))) for m in members}
-    lo, hi = min(tiers), max(tiers)
-    if lo == hi:
-        return f"T{lo}"
-    return f"T{lo}-T{hi}"
 
 
 def _resolve_plan_context(plan: dict, cluster_filter: str | None) -> tuple[dict | None, str | None]:
@@ -45,20 +34,42 @@ def _resolve_plan_context(plan: dict, cluster_filter: str | None) -> tuple[dict 
 def _print_queue_header(
     *,
     items: list[dict],
-    tier_counts: dict,
     include_skipped: bool,
     plan: dict,
     plan_data: dict | None,
+    new_count: int = 0,
 ) -> None:
+    from desloppify.app.commands.helpers.queue_progress import (
+        QueueBreakdown,
+        format_queue_headline,
+    )
+
     total = len(items)
     skipped_count = sum(1 for it in items if it.get("plan_skipped"))
     non_skipped = total - skipped_count
-    tc_parts = " ".join(f"T{t}:{tier_counts.get(t, 0)}" for t in (1, 2, 3, 4))
-    finding_total = sum(tier_counts.get(t, 0) for t in (1, 2, 3, 4))
-    if finding_total != non_skipped:
-        print(colorize(f"\n  Queue: {non_skipped} entries  ({finding_total} findings: {tc_parts})", "bold"))
-    else:
-        print(colorize(f"\n  Queue: {non_skipped} items  ({tc_parts})", "bold"))
+    plan_skipped_total = len(plan.get("skipped", {})) if plan_data else 0
+
+    # Count subjective items in the visible list
+    subjective = sum(
+        1 for it in items if it.get("kind") == "subjective_dimension"
+    )
+
+    # Count plan-ordered items (minus skipped)
+    plan_ordered = 0
+    if plan_data:
+        queue_order = plan_data.get("queue_order", [])
+        skipped_ids = set(plan_data.get("skipped", {}).keys())
+        plan_ordered = sum(1 for fid in queue_order if fid not in skipped_ids)
+
+    breakdown = QueueBreakdown(
+        queue_total=non_skipped,
+        plan_ordered=plan_ordered,
+        skipped=plan_skipped_total,
+        subjective=subjective,
+    )
+    headline = format_queue_headline(breakdown)
+    new_suffix = f"  ({new_count} new this scan)" if new_count > 0 else ""
+    print(colorize(f"\n  {headline}{new_suffix}", "bold"))
 
     focus = plan.get("active_cluster") if plan_data else None
     if focus:
@@ -66,12 +77,11 @@ def _print_queue_header(
 
     if include_skipped or skipped_count != 0:
         return
-    plan_skipped_count = len(plan.get("skipped", {})) if plan_data else 0
-    if not plan_skipped_count:
+    if not plan_skipped_total:
         return
     print(
         colorize(
-            f"  ({plan_skipped_count} skipped item{'s' if plan_skipped_count != 1 else ''}"
+            f"  ({plan_skipped_total} skipped item{'s' if plan_skipped_total != 1 else ''}"
             " hidden — use --include-skipped)",
             "dim",
         )
@@ -84,29 +94,47 @@ def _queue_display_items(items: list[dict], *, top: int) -> list[dict]:
     return items
 
 
-def _build_rows(display_items: list[dict]) -> list[list[str]]:
+def _build_rows(display_items: list[dict], new_ids: set[str] | None = None) -> list[list[str]]:
     rows: list[list[str]] = []
+    _new = new_ids or set()
     for idx, item in enumerate(display_items, 1):
         pos = str(idx)
         kind = item.get("kind", "finding")
 
-        if kind == "cluster":
-            tier_str = _cluster_tier_label(item)
+        if kind == "workflow_stage":
+            blocked = item.get("is_blocked", False)
+            blocked_tag = " [blocked]" if blocked else ""
+            conf_str = "—"
+            detector = "planning"
+            summary = f"[TRIAGE] {item.get('summary', '')}{blocked_tag}"
+            cluster_name = ""
+        elif kind == "workflow_action":
+            conf_str = "—"
+            detector = "workflow"
+            summary = item.get("summary", "")
+            cluster_name = ""
+        elif kind == "cluster":
+            conf_str = item.get("confidence", "high")
             member_count = item.get("member_count", 0)
             detector = item.get("detector", "cluster")
-            summary = f"[{member_count} items] {item.get('summary', '')}"
+            new_in_cluster = sum(
+                1 for m in item.get("members", [])
+                if m.get("id") in _new
+            )
+            new_tag = f" (+{new_in_cluster} new)" if new_in_cluster else ""
+            summary = f"[{member_count} items{new_tag}] {item.get('summary', '')}"
             cluster_name = item.get("cluster_name", item.get("id", ""))
         else:
-            tier_val = int(item.get("effective_tier", item.get("tier", 3)))
-            tier_str = f"T{tier_val}"
+            conf_str = item.get("confidence", "medium")
             detector = item.get("detector", "")
             summary = item.get("summary", "")
             plan_cluster = item.get("plan_cluster")
             cluster_name = plan_cluster.get("name", "") if isinstance(plan_cluster, dict) else ""
 
+        prefix = "* " if item.get("id") in _new else ""
         suffix = " [skip]" if item.get("plan_skipped") else ""
-        summary_display = _truncate(summary, 48) + suffix
-        rows.append([pos, tier_str, detector, summary_display, cluster_name])
+        summary_display = _truncate(prefix + summary, 48) + suffix
+        rows.append([pos, conf_str, detector, summary_display, cluster_name])
     return rows
 
 
@@ -118,17 +146,16 @@ def cmd_plan_queue(args: argparse.Namespace) -> None:
         return
 
     top = getattr(args, "top", 30)
-    tier_filter = getattr(args, "tier", None)
     cluster_filter = getattr(args, "cluster", None)
     include_skipped = bool(getattr(args, "include_skipped", False))
 
     plan = load_plan()
+    print_triage_guardrail_info(plan=plan, state=state)
     plan_data, effective_cluster = _resolve_plan_context(plan, cluster_filter)
 
     queue = build_work_queue(
         state,
         options=QueueBuildOptions(
-            tier=tier_filter,
             count=None,
             scan_path=state.get("scan_path"),
             status="open",
@@ -140,14 +167,24 @@ def cmd_plan_queue(args: argparse.Namespace) -> None:
         ),
     )
     items = queue.get("items", [])
-    tier_counts = queue.get("tier_counts", {})
+
+    sort_by = getattr(args, "sort", "priority")
+    all_new_ids: set[str] = queue.get("new_ids", set())
+    # Merge review-based new finding IDs (since last triage)
+    review_new_ids = compute_new_finding_ids(plan, state)
+    all_new_ids = all_new_ids | review_new_ids
+    item_ids = {it.get("id") for it in items}
+    new_ids = all_new_ids & item_ids
+
+    if sort_by == "recent":
+        items = sorted(items, key=lambda it: it.get("first_seen", ""), reverse=True)
 
     _print_queue_header(
         items=items,
-        tier_counts=tier_counts,
         include_skipped=include_skipped,
         plan=plan,
         plan_data=plan_data,
+        new_count=len(new_ids),
     )
 
     if not items:
@@ -156,8 +193,8 @@ def cmd_plan_queue(args: argparse.Namespace) -> None:
 
     # Determine which items to show
     display_items = _queue_display_items(items, top=top)
-    headers = ["#", "Tier", "Detector", "Summary", "Cluster"]
-    rows = _build_rows(display_items)
+    headers = ["#", "Confidence", "Detector", "Summary", "Cluster"]
+    rows = _build_rows(display_items, new_ids=new_ids)
 
     print()
     widths = [4, 4, 12, 50, 16]

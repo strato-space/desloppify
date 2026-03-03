@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from desloppify import state as state_mod
-from desloppify.app.commands.scan.scan_helpers import format_delta
 from desloppify.app.commands.helpers.score import target_strict_score_from_config
 from desloppify.core import config as config_mod
 from desloppify.core.output_api import colorize
+
+
+def _format_delta(value: float, prev: float | None) -> tuple[str, str]:
+    """Return (delta_str, color) for a score change."""
+    delta = value - prev if prev is not None else 0
+    delta_str = f" ({'+' if delta > 0 else ''}{delta:.1f})" if delta != 0 else ""
+    color = "green" if delta > 0 else ("red" if delta < 0 else "dim")
+    return delta_str, color
 
 
 def print_score_update(
@@ -34,10 +41,10 @@ def print_score_update(
         print(colorize(f"\n  {label} unavailable — run `desloppify scan`.", "yellow"))
         return
 
-    overall_s, overall_c = format_delta(new.overall, prev.overall)
-    objective_s, objective_c = format_delta(new.objective, prev.objective)
-    strict_s, strict_c = format_delta(new.strict, prev.strict)
-    verified_s, verified_c = format_delta(new.verified, prev.verified)
+    overall_s, overall_c = _format_delta(new.overall, prev.overall)
+    objective_s, objective_c = _format_delta(new.objective, prev.objective)
+    strict_s, strict_c = _format_delta(new.strict, prev.strict)
+    verified_s, verified_c = _format_delta(new.verified, prev.verified)
 
     print(
         f"\n  {label}: "

@@ -16,6 +16,11 @@ from desloppify.intelligence.review.context import (
     dep_graph_lookup,
     importer_count,
 )
+from desloppify.intelligence.review.selection_cache import (
+    count_fresh,
+    count_stale,
+    get_file_findings,
+)
 from desloppify.languages import get_lang
 
 logger = logging.getLogger(__name__)
@@ -198,45 +203,6 @@ def is_low_value_file(filepath: str, lang_or_name=None) -> bool:
     """Whether a file path is low-value for subjective review."""
     pattern = low_value_pattern(lang_or_name)
     return bool(pattern.search(filepath))
-
-
-def get_file_findings(state: dict, filepath: str) -> list[dict]:
-    """Get existing open findings for a file (summaries for context)."""
-    rpath = rel(filepath)
-    findings = state.get("findings", {})
-    return [
-        {"detector": f["detector"], "summary": f["summary"], "id": f["id"]}
-        for f in findings.values()
-        if f.get("file") == rpath and f["status"] == "open"
-    ]
-
-
-def count_fresh(state: dict, max_age_days: int) -> int:
-    """Count files in review cache that are still fresh."""
-    cache = state.get("review_cache", {}).get("files", {})
-    now = datetime.now(UTC)
-    count = 0
-    for entry in cache.values():
-        reviewed_at = entry.get("reviewed_at", "")
-        if reviewed_at:
-            try:
-                reviewed = datetime.fromisoformat(reviewed_at)
-                if (now - reviewed).days <= max_age_days:
-                    count += 1
-            except (ValueError, TypeError) as exc:
-                logger.debug(
-                    "Invalid review cache date %r while counting fresh files: %s",
-                    reviewed_at,
-                    exc,
-                )
-    return count
-
-
-def count_stale(state: dict, max_age_days: int) -> int:
-    """Count files in review cache that are stale."""
-    cache = state.get("review_cache", {}).get("files", {})
-    total = len(cache)
-    return total - count_fresh(state, max_age_days)
 
 
 __all__ = [

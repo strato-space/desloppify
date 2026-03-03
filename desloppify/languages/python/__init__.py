@@ -6,7 +6,7 @@ import shutil
 from functools import partial
 from pathlib import Path
 
-from desloppify.core._internal.text_utils import get_area
+from desloppify.core.text_api import get_area
 from desloppify.core.source_discovery import find_py_files
 from desloppify.engine.detectors.base import FunctionInfo
 from desloppify.engine.policy.zones import COMMON_ZONE_RULES, Zone, ZoneRule

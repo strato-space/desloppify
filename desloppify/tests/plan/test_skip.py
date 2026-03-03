@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from desloppify.engine._plan.operations import (
+    add_to_cluster,
+    append_log_entry,
+    create_cluster,
     move_items,
     purge_ids,
     skip_items,
@@ -302,5 +305,100 @@ def test_skip_and_unskip_roundtrip():
     assert set(need_reopen) == {"b", "c"}
     assert plan["queue_order"] == ["a", "b", "c"]
     assert plan["skipped"] == {}
+
+
+# ---------------------------------------------------------------------------
+# purge_ids clears override cluster ref
+# ---------------------------------------------------------------------------
+
+def test_purge_ids_clears_override_cluster_ref():
+    """purge_ids should clear the cluster field from overrides."""
+    plan = _plan_with_queue("a", "b")
+    ensure_plan_defaults(plan)
+    create_cluster(plan, "my-cluster")
+    add_to_cluster(plan, "my-cluster", ["a"])
+
+    assert plan["overrides"]["a"]["cluster"] == "my-cluster"
+
+    purged = purge_ids(plan, ["a"])
+    assert purged == 1
+    # Override still exists (notes kept for history) but cluster cleared
+    assert plan["overrides"]["a"]["cluster"] is None
+
+
+# ---------------------------------------------------------------------------
+# append_log_entry
+# ---------------------------------------------------------------------------
+
+def test_append_log_entry_basic():
+    plan = empty_plan()
+    append_log_entry(plan, "done", finding_ids=["a", "b"], actor="user", note="test note")
+    log = plan["execution_log"]
+    assert len(log) == 1
+    entry = log[0]
+    assert entry["action"] == "done"
+    assert entry["finding_ids"] == ["a", "b"]
+    assert entry["actor"] == "user"
+    assert entry["note"] == "test note"
+    assert "timestamp" in entry
+
+
+def test_append_log_entry_caps_at_default(monkeypatch):
+    import desloppify.engine._plan.operations as ops_mod
+
+    cap = 500
+    monkeypatch.setattr(ops_mod, "_get_log_cap", lambda: cap)
+
+    plan = empty_plan()
+    for i in range(cap + 10):
+        append_log_entry(plan, "test", finding_ids=[str(i)], actor="user")
+
+    log = plan["execution_log"]
+    assert len(log) == cap
+    # Oldest entries should have been dropped
+    assert log[0]["finding_ids"] == ["10"]
+    assert log[-1]["finding_ids"] == [str(cap + 9)]
+
+
+def test_append_log_entry_uncapped(monkeypatch):
+    import desloppify.engine._plan.operations as ops_mod
+
+    monkeypatch.setattr(ops_mod, "_get_log_cap", lambda: 0)
+
+    plan = empty_plan()
+    total = 600
+    for i in range(total):
+        append_log_entry(plan, "test", finding_ids=[str(i)], actor="user")
+
+    assert len(plan["execution_log"]) == total
+
+
+def test_append_log_entry_custom_cap(monkeypatch):
+    import desloppify.engine._plan.operations as ops_mod
+
+    monkeypatch.setattr(ops_mod, "_get_log_cap", lambda: 50)
+
+    plan = empty_plan()
+    for i in range(60):
+        append_log_entry(plan, "test", finding_ids=[str(i)], actor="user")
+
+    assert len(plan["execution_log"]) == 50
+    assert plan["execution_log"][0]["finding_ids"] == ["10"]
+
+
+def test_append_log_entry_with_cluster_and_detail():
+    plan = empty_plan()
+    append_log_entry(
+        plan,
+        "cluster_done",
+        finding_ids=["a"],
+        cluster_name="auto/unused",
+        actor="agent",
+        detail={"method": "bulk"},
+    )
+    entry = plan["execution_log"][0]
+    assert entry["cluster_name"] == "auto/unused"
+    assert entry["detail"] == {"method": "bulk"}
+    assert entry["actor"] == "agent"
 
 

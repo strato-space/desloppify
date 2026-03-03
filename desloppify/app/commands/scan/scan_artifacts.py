@@ -12,7 +12,7 @@ from desloppify.app.commands.scan.scan_workflow import (
     ScanMergeResult,
     ScanNoiseSnapshot,
 )
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.core.config import config_for_query
 from desloppify.core.exception_sets import PLAN_LOAD_EXCEPTIONS
 from desloppify.core.output_contract import OutputResult

@@ -118,29 +118,26 @@ def collapse_elegance_dimensions(
         label = "Elegance (combined)"
 
     pass_rate = round(score_avg / 100.0, 4)
-    return [
-        *remaining_rows,
-        (
-            label,
-            {
-                "score": score_avg,
-                "strict": strict_avg,
-                "checks": checks_total,
+    combined_entry = {
+        "score": score_avg,
+        "strict": strict_avg,
+        "checks": checks_total,
+        "issues": issues_total,
+        "tier": tier,
+        "detectors": {
+            "subjective_assessment": {
+                "potential": checks_total,
+                "pass_rate": pass_rate,
                 "issues": issues_total,
-                "tier": tier,
-                "detectors": {
-                    "subjective_assessment": {
-                        "potential": checks_total,
-                        "pass_rate": pass_rate,
-                        "issues": issues_total,
-                        "weighted_failures": round(checks_total * (1 - pass_rate), 4),
-                        "components": [name for name, _ in elegance_rows],
-                        "placeholder": any(placeholder_flags),
-                    }
-                },
-            },
-        ),
-    ]
+                "weighted_failures": round(checks_total * (1 - pass_rate), 4),
+                "components": [name for name, _ in elegance_rows],
+            }
+        },
+    }
+    combined_entry["detectors"]["subjective_assessment"]["placeholder"] = any(
+        placeholder_flags
+    )
+    return [*remaining_rows, (label, combined_entry)]
 
 
 def limit_scorecard_dimensions(

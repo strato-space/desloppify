@@ -25,7 +25,7 @@ def build_workflow_guide(attest_example: str) -> str:
         5. **Rescan**: `desloppify scan --path <path>` — verify improvements, catch cascading effects.
         6. **Subjective review**: `desloppify review --run-batches --runner codex --parallel --scan-after-import`
            (or `review --prepare` → review → import for manual path).
-        7. **Synthesize** (after review): `desloppify plan synthesize` — staged workflow to analyze
+        7. **Triage** (after review): `desloppify plan triage` — staged workflow to analyze
            findings before fixing. Complete all 4 stages (observe → reflect → organize → commit).
         8. **Check progress**: `desloppify status` — dimension scores dashboard.
 

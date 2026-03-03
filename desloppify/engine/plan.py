@@ -9,8 +9,10 @@ from __future__ import annotations
 # --- schema -----------------------------------------------------------------
 from desloppify.engine._plan.schema import (
     EPIC_PREFIX,
+    ExecutionLogEntry,
     PLAN_VERSION,
     Cluster,
+    CommitRecord,
     ItemOverride,
     PlanModel,
     SkipEntry,
@@ -19,7 +21,7 @@ from desloppify.engine._plan.schema import (
     VALID_SKIP_KINDS,
     empty_plan,
     ensure_plan_defaults,
-    synthesis_clusters,
+    triage_clusters,
     validate_plan,
 )
 
@@ -36,10 +38,12 @@ from desloppify.engine._plan.persistence import (
 from desloppify.engine._plan.operations import (
     add_to_cluster,
     annotate_finding,
+    append_log_entry,
     clear_focus,
     create_cluster,
     delete_cluster,
     describe_finding,
+    merge_clusters,
     move_cluster,
     move_items,
     purge_ids,
@@ -54,7 +58,9 @@ from desloppify.engine._plan.operations import (
 # --- reconcile --------------------------------------------------------------
 from desloppify.engine._plan.reconcile import (
     ReconcileResult,
+    ReviewImportSyncResult,
     reconcile_plan_after_scan,
+    sync_plan_after_review_import,
 )
 
 # --- auto-clustering --------------------------------------------------------
@@ -63,41 +69,68 @@ from desloppify.engine._plan.auto_cluster import (
     auto_cluster_findings,
 )
 
+# --- commit tracking --------------------------------------------------------
+from desloppify.engine._plan.commit_tracking import (
+    add_uncommitted_findings,
+    commit_tracking_summary,
+    filter_finding_ids_by_pattern,
+    find_commit_for_finding,
+    generate_pr_body,
+    get_uncommitted_findings,
+    purge_uncommitted_ids,
+    record_commit,
+    suggest_commit_message,
+)
+
 # --- stale dimensions -------------------------------------------------------
 from desloppify.engine._plan.stale_dimensions import (
-    SYNTHESIS_ID,
+    TRIAGE_ID,
+    TRIAGE_IDS,
+    TRIAGE_PREFIX,
+    TRIAGE_STAGE_IDS,
+    SYNTHETIC_PREFIXES,
+    WORKFLOW_CREATE_PLAN_ID,
+    WORKFLOW_PREFIX,
     StaleDimensionSyncResult,
     UnscoredDimensionSyncResult,
+    TriageSyncResult,
+    compute_new_finding_ids,
+    is_triage_stale,
     review_finding_snapshot_hash,
+    sync_create_plan_needed,
     sync_stale_dimensions,
-    sync_synthesis_needed,
+    sync_triage_needed,
     sync_unscored_dimensions,
 )
 
-def synthesis_phase_banner(plan: PlanModel) -> str:
-    """Return a banner string when ``synthesis::pending`` is in the queue."""
+def triage_phase_banner(plan: PlanModel) -> str:
+    """Return a banner string when triage stage IDs are in the queue."""
     ensure_plan_defaults(plan)
-    if SYNTHESIS_ID not in plan.get("queue_order", []):
+    order = set(plan.get("queue_order", []))
+    has_triage = any(sid in order for sid in TRIAGE_IDS)
+    if not has_triage:
         return ""
-    meta = plan.get("epic_synthesis_meta", {})
-    stages = meta.get("synthesis_stages", {})
+    meta = plan.get("epic_triage_meta", {})
+    stages = meta.get("triage_stages", {})
     completed = [s for s in ("observe", "reflect", "organize") if s in stages]
     if completed:
         return (
-            f"Synthesis in progress ({len(completed)}/4 stages complete). "
-            "Run: desloppify plan synthesize"
+            f"TRIAGE MODE ({len(completed)}/4 stages complete) — "
+            "complete all stages to exit. Run: desloppify plan triage"
         )
     return (
-        "Synthesis needed — review findings require analysis before fixing. "
-        "Run: desloppify plan synthesize"
+        "TRIAGE MODE — review findings need analysis before fixing. "
+        "Run: desloppify plan triage"
     )
 
 
 __all__ = [
     # schema
     "EPIC_PREFIX",
+    "ExecutionLogEntry",
     "PLAN_VERSION",
     "Cluster",
+    "CommitRecord",
     "ItemOverride",
     "PlanModel",
     "SkipEntry",
@@ -106,7 +139,7 @@ __all__ = [
     "VALID_SKIP_KINDS",
     "empty_plan",
     "ensure_plan_defaults",
-    "synthesis_clusters",
+    "triage_clusters",
     "validate_plan",
     # persistence
     "PLAN_FILE",
@@ -117,10 +150,12 @@ __all__ = [
     # operations
     "add_to_cluster",
     "annotate_finding",
+    "append_log_entry",
     "clear_focus",
     "create_cluster",
     "delete_cluster",
     "describe_finding",
+    "merge_clusters",
     "move_cluster",
     "move_items",
     "purge_ids",
@@ -132,18 +167,40 @@ __all__ = [
     "unskip_items",
     # reconcile
     "ReconcileResult",
+    "ReviewImportSyncResult",
     "reconcile_plan_after_scan",
+    "sync_plan_after_review_import",
+    # commit tracking
+    "add_uncommitted_findings",
+    "commit_tracking_summary",
+    "filter_finding_ids_by_pattern",
+    "find_commit_for_finding",
+    "generate_pr_body",
+    "get_uncommitted_findings",
+    "purge_uncommitted_ids",
+    "record_commit",
+    "suggest_commit_message",
     # auto-clustering
     "AUTO_PREFIX",
     "auto_cluster_findings",
     # stale dimensions
-    "SYNTHESIS_ID",
+    "TRIAGE_ID",
+    "TRIAGE_IDS",
+    "TRIAGE_PREFIX",
+    "TRIAGE_STAGE_IDS",
+    "SYNTHETIC_PREFIXES",
+    "WORKFLOW_CREATE_PLAN_ID",
+    "WORKFLOW_PREFIX",
     "StaleDimensionSyncResult",
+    "TriageSyncResult",
     "UnscoredDimensionSyncResult",
+    "compute_new_finding_ids",
+    "is_triage_stale",
     "review_finding_snapshot_hash",
+    "sync_create_plan_needed",
     "sync_stale_dimensions",
-    "sync_synthesis_needed",
+    "sync_triage_needed",
     "sync_unscored_dimensions",
-    # synthesis
-    "synthesis_phase_banner",
+    # triage
+    "triage_phase_banner",
 ]

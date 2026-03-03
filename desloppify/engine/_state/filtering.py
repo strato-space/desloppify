@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 
 __all__ = [
     "finding_in_scan_scope",
@@ -100,8 +101,13 @@ def matched_ignore_pattern(
                 return pattern
             continue
 
-        if file == pattern or file == rel(pattern):
-            return pattern
+        raw_base = pattern.rstrip("/")
+        rel_base = rel(pattern).rstrip("/")
+        for base in (raw_base, rel_base):
+            if not base:
+                continue
+            if file == base or file.startswith(base + "/"):
+                return pattern
 
     return None
 
@@ -169,15 +175,34 @@ def make_finding(
     }
 
 
+_HEX8_RE = re.compile(r'^[0-9a-f]{8}$')
+
+
 def _matches_pattern(finding_id: str, finding: dict[str, str], pattern: str) -> bool:
-    """Check if a finding matches by ID, glob, prefix, detector, or path."""
-    return (
-        finding_id == pattern
-        or ("*" in pattern and fnmatch.fnmatch(finding_id, pattern))
-        or ("::" in pattern and finding_id.startswith(pattern))
-        or (
-            finding.get("detector") == pattern
-            or finding["file"] == pattern
-            or finding["file"].startswith(pattern.rstrip("/") + "/")
-        )
-    )
+    """Check if a finding matches by ID, glob, prefix, detector, suffix, or path."""
+    if finding_id == pattern:
+        return True
+    if "*" in pattern and fnmatch.fnmatch(finding_id, pattern):
+        return True
+    if "::" in pattern and finding_id.startswith(pattern):
+        return True
+    if _HEX8_RE.match(pattern) and finding_id.endswith("::" + pattern):
+        return True
+    if (
+        finding.get("detector") == pattern
+        or finding["file"] == pattern
+        or finding["file"].startswith(pattern.rstrip("/") + "/")
+    ):
+        return True
+
+    # Name-segment fallback: bare name matches the last ::segment of the ID
+    if "::" not in pattern and "::" in finding_id:
+        segments = finding_id.split("::")
+        name_segment = segments[-1]
+        if name_segment == pattern:
+            return True
+        # For hashed IDs, also match the descriptive name (second-to-last segment)
+        if len(segments) >= 3 and _HEX8_RE.match(name_segment) and segments[-2] == pattern:
+            return True
+
+    return False

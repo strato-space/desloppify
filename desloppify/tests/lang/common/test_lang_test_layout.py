@@ -14,7 +14,7 @@ try:
 except ImportError:
     setuptools = None  # type: ignore[assignment]
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.engine.policy.zones import FileZoneMap, Zone
 from desloppify.core.discovery_api import rel
 from desloppify.languages import available_langs, get_lang

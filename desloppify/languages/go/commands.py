@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 
 from desloppify.languages._framework.commands_base import (
-    build_standard_detect_registry,
+    make_standard_detect_registry_getter,
     make_cmd_complexity,
     make_cmd_cycles,
     make_cmd_deps,
@@ -64,13 +64,11 @@ def cmd_dupes(args: argparse.Namespace) -> None:
     _cmd_dupes_impl(args)
 
 
-def get_detect_commands() -> dict[str, object]:
-    """Return the standard detect command registry for Go."""
-    return build_standard_detect_registry(
-        cmd_deps=cmd_deps,
-        cmd_cycles=cmd_cycles,
-        cmd_orphaned=cmd_orphaned,
-        cmd_dupes=cmd_dupes,
-        cmd_large=cmd_large,
-        cmd_complexity=cmd_complexity,
-    )
+get_detect_commands = make_standard_detect_registry_getter(
+    cmd_deps=cmd_deps,
+    cmd_cycles=cmd_cycles,
+    cmd_orphaned=cmd_orphaned,
+    cmd_dupes=cmd_dupes,
+    cmd_large=cmd_large,
+    cmd_complexity=cmd_complexity,
+)

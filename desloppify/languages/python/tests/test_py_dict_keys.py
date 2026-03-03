@@ -152,6 +152,40 @@ class TestDeadWrite:
         entries, _ = detect_dict_key_flow(path)
         assert "dead_write" not in _kinds(entries)
 
+    def test_no_dead_write_when_assigned_into_parent_container(self, tmp_path):
+        """Dict assigned into another dict key should be treated as escaped."""
+        path = _write_py(
+            tmp_path,
+            """\
+            def stage():
+                meta = {}
+                child = {}
+                child["a"] = 1
+                child["b"] = 2
+                child["c"] = 3
+                meta["child"] = child
+                return meta
+        """,
+        )
+        entries, _ = detect_dict_key_flow(path)
+        assert "dead_write" not in _kinds(entries)
+
+    def test_no_dead_write_when_nested_in_list_return(self, tmp_path):
+        """Dict returned inside nested list/tuple structures should be escaped."""
+        path = _write_py(
+            tmp_path,
+            """\
+            def combined():
+                item = {}
+                item["a"] = 1
+                item["b"] = 2
+                item["c"] = 3
+                return [("label", item)]
+        """,
+        )
+        entries, _ = detect_dict_key_flow(path)
+        assert "dead_write" not in _kinds(entries)
+
 
 # ── Overwritten keys ──────────────────────────────────────
 

@@ -311,6 +311,10 @@ def _build_boundary_violations(by_detector: dict[str, list[dict]]) -> list[dict]
             detail = finding.get("detail", {})
             if not isinstance(detail, dict):
                 detail = {}
+            detail.setdefault("target", "")
+            detail.setdefault("imported_from", "")
+            detail.setdefault("direction", "")
+            detail.setdefault("violation", "")
             results.append({
                 "file": filepath,
                 "target": detail.get("target", detail.get("imported_from", "")),
@@ -343,6 +347,11 @@ def _build_private_crossings(by_detector: dict[str, list[dict]]) -> list[dict]:
         detail = finding.get("detail", {})
         if not isinstance(detail, dict):
             detail = {}
+        detail.setdefault("symbol", "")
+        detail.setdefault("name", "")
+        detail.setdefault("source", "")
+        detail.setdefault("imported_from", "")
+        detail.setdefault("target", filepath)
         results.append({
             "file": filepath,
             "symbol": detail.get("symbol", detail.get("name", "")),
@@ -379,6 +388,10 @@ def _build_duplicate_clusters(by_detector: dict[str, list[dict]]) -> list[dict]:
             detail = finding.get("detail", {})
             if not isinstance(detail, dict):
                 detail = {}
+            detail.setdefault("kind", det_name)
+            detail.setdefault("name", "")
+            detail.setdefault("function", "")
+            detail.setdefault("files", [])
             kind = detail.get("kind", det_name)
             name = detail.get("name", detail.get("function", finding.get("summary", "")[:60]))
             files = detail.get("files", [])
@@ -402,6 +415,7 @@ def _build_naming_drift(by_detector: dict[str, list[dict]]) -> list[dict]:
         detail = finding.get("detail", {})
         if not isinstance(detail, dict):
             detail = {}
+        detail.setdefault("expected_convention", "")
         # Group by directory
         parts = filepath.rsplit("/", 1)
         directory = parts[0] + "/" if len(parts) > 1 else "./"
@@ -429,6 +443,11 @@ def _build_flat_dir_findings(by_detector: dict[str, list[dict]]) -> list[dict]:
         detail = finding.get("detail", {})
         if not isinstance(detail, dict):
             detail = {}
+        detail.setdefault("kind", "")
+        detail.setdefault("reason", "")
+        detail.setdefault("file_count", 0)
+        detail.setdefault("score", 0)
+        detail.setdefault("combined_score", 0)
         results.append({
             "directory": filepath,
             "kind": detail.get("kind", detail.get("reason", "")),

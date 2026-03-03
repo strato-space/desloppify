@@ -4,12 +4,55 @@ from __future__ import annotations
 
 from desloppify.engine._plan.schema import (
     Cluster,
+    ExecutionLogEntry,
     PlanModel,
     SkipEntry,
     empty_plan,
     ensure_plan_defaults,
 )
 from desloppify.engine._state.schema import utc_now
+
+
+_DEFAULT_MAX_LOG_ENTRIES = 10000
+
+
+def _get_log_cap() -> int:
+    """Read execution_log_max_entries from config. Returns 0 for unlimited."""
+    try:
+        from desloppify.core.config import load_config
+
+        config = load_config()
+        value = config.get("execution_log_max_entries", _DEFAULT_MAX_LOG_ENTRIES)
+        return max(0, int(value))
+    except (ImportError, OSError, ValueError, TypeError):
+        return _DEFAULT_MAX_LOG_ENTRIES
+
+
+def append_log_entry(
+    plan: PlanModel,
+    action: str,
+    *,
+    finding_ids: list[str] | None = None,
+    cluster_name: str | None = None,
+    actor: str = "user",
+    note: str | None = None,
+    detail: dict | None = None,
+) -> None:
+    """Append a structured entry to the plan's execution log."""
+    log = plan.get("execution_log", [])
+    entry: ExecutionLogEntry = {
+        "timestamp": utc_now(),
+        "action": action,
+        "finding_ids": finding_ids or [],
+        "cluster_name": cluster_name,
+        "actor": actor,
+        "note": note,
+        "detail": detail or {},
+    }
+    log.append(entry)
+    cap = _get_log_cap()
+    if cap > 0 and len(log) > cap:
+        plan["execution_log"] = log[-cap:]
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +157,13 @@ def move_items(
 ) -> int:
     """Move finding IDs to a position in queue_order. Returns count moved."""
     ensure_plan_defaults(plan)
+
+    # Triage stage IDs are workflow-managed and cannot be manually reordered
+    from desloppify.engine._plan.stale_dimensions import TRIAGE_IDS
+    finding_ids = [fid for fid in finding_ids if fid not in TRIAGE_IDS]
+    if not finding_ids:
+        return 0
+
     order: list[str] = plan["queue_order"]
 
     # Remove from skipped if present
@@ -132,6 +182,17 @@ def move_items(
     # Insert in original order
     for i, fid in enumerate(finding_ids):
         order.insert(idx + i, fid)
+
+    # Track user-promoted IDs only when explicitly moved to the front.
+    # Moving to bottom/down/after should not create a promotion barrier.
+    if position == "top":
+        promoted: list[str] = plan.get("promoted_ids", [])
+        existing_promoted = set(promoted)
+        for fid in finding_ids:
+            if fid not in existing_promoted:
+                promoted.append(fid)
+                existing_promoted.add(fid)
+        plan["promoted_ids"] = promoted
 
     return len(finding_ids)
 
@@ -156,6 +217,9 @@ def skip_items(
     now = utc_now()
     count = 0
     skipped: dict[str, SkipEntry] = plan["skipped"]
+    skip_set = set(finding_ids)
+    promoted: list[str] = plan.get("promoted_ids", [])
+    plan["promoted_ids"] = [p for p in promoted if p not in skip_set]
     for fid in finding_ids:
         _remove_id_from_lists(plan, fid)
         skipped[fid] = {
@@ -270,7 +334,7 @@ def create_cluster(
         )
     if name.startswith("epic/"):
         raise ValueError(
-            f"Cluster names starting with 'epic/' are reserved for synthesis epics: {name!r}"
+            f"Cluster names starting with 'epic/' are reserved for triage epics: {name!r}"
         )
     if name in plan["clusters"]:
         raise ValueError(f"Cluster {name!r} already exists")
@@ -368,6 +432,60 @@ def delete_cluster(plan: PlanModel, name: str) -> list[str]:
     return orphaned
 
 
+def merge_clusters(
+    plan: PlanModel, source_name: str, target_name: str
+) -> tuple[int, list[str]]:
+    """Move all source findings to target, copy missing metadata, delete source.
+
+    Returns ``(added_count, source_finding_ids)``.
+    """
+    ensure_plan_defaults(plan)
+    if source_name == target_name:
+        raise ValueError("Cannot merge a cluster into itself")
+    source = plan["clusters"].get(source_name)
+    if source is None:
+        raise ValueError(f"Source cluster {source_name!r} does not exist")
+    target = plan["clusters"].get(target_name)
+    if target is None:
+        raise ValueError(f"Target cluster {target_name!r} does not exist")
+
+    source_ids = list(source.get("finding_ids", []))
+    target_ids: list[str] = target["finding_ids"]
+    now = utc_now()
+
+    # Add source findings to target (deduplicate)
+    existing = set(target_ids)
+    added = 0
+    for fid in source_ids:
+        if fid not in existing:
+            target_ids.append(fid)
+            existing.add(fid)
+            added += 1
+        # Update override to point to target cluster
+        overrides = plan["overrides"]
+        if fid not in overrides:
+            overrides[fid] = {"finding_id": fid, "created_at": now}
+        overrides[fid]["cluster"] = target_name
+        overrides[fid]["updated_at"] = now
+
+    # Copy metadata from source if target is missing them
+    if not target.get("description") and source.get("description"):
+        target["description"] = source["description"]
+    if not target.get("action_steps") and source.get("action_steps"):
+        target["action_steps"] = list(source["action_steps"])
+    if not target.get("action") and source.get("action"):
+        target["action"] = source["action"]
+
+    target["updated_at"] = now
+
+    # Delete source cluster
+    plan["clusters"].pop(source_name, None)
+    if plan.get("active_cluster") == source_name:
+        plan["active_cluster"] = None
+
+    return added, source_ids
+
+
 def move_cluster(
     plan: PlanModel,
     cluster_name: str,
@@ -429,6 +547,10 @@ def purge_ids(plan: PlanModel, finding_ids: list[str]) -> int:
     ensure_plan_defaults(plan)
     found = 0
 
+    purge_set = set(finding_ids)
+    promoted: list[str] = plan.get("promoted_ids", [])
+    plan["promoted_ids"] = [p for p in promoted if p not in purge_set]
+
     order: list[str] = plan["queue_order"]
     skipped: dict[str, SkipEntry] = plan["skipped"]
     for fid in finding_ids:
@@ -444,6 +566,11 @@ def purge_ids(plan: PlanModel, finding_ids: list[str]) -> int:
             if fid in ids:
                 ids.remove(fid)
                 was_present = True
+        # Clear stale cluster reference from override (preserve notes/descriptions)
+        override = plan.get("overrides", {}).get(fid)
+        if override and override.get("cluster"):
+            override["cluster"] = None
+            override["updated_at"] = utc_now()
         if was_present:
             found += 1
 
@@ -453,10 +580,12 @@ def purge_ids(plan: PlanModel, finding_ids: list[str]) -> int:
 __all__ = [
     "add_to_cluster",
     "annotate_finding",
+    "append_log_entry",
     "clear_focus",
     "create_cluster",
     "delete_cluster",
     "describe_finding",
+    "merge_clusters",
     "move_cluster",
     "move_items",
     "purge_ids",

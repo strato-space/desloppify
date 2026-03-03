@@ -18,11 +18,23 @@ from desloppify.app.commands.plan.override_handlers import (
 from desloppify.app.commands.plan.queue_render import cmd_plan_queue
 from desloppify.app.commands.plan_cmd import cmd_plan_output as _plan_output_impl
 from desloppify.core.output_api import colorize
-from desloppify.engine.plan import load_plan, reset_plan, save_plan
+from desloppify.engine.plan import (
+    WORKFLOW_CREATE_PLAN_ID,
+    append_log_entry,
+    load_plan,
+    purge_ids,
+    reset_plan,
+    save_plan,
+)
 
 
 def _cmd_plan_generate(args: argparse.Namespace) -> None:
     """Generate the prioritized markdown plan (existing behavior)."""
+    # Auto-resolve the create-plan workflow item when plan runs
+    plan = load_plan()
+    if WORKFLOW_CREATE_PLAN_ID in plan.get("queue_order", []):
+        purge_ids(plan, [WORKFLOW_CREATE_PLAN_ID])
+        save_plan(plan)
     _plan_output_impl(args)
 
 
@@ -66,11 +78,33 @@ def _cmd_plan_show(args: argparse.Namespace) -> None:
     if superseded:
         print(f"  Disappeared:      {superseded} (resolved or removed since last scan)")
 
+    # Commit tracking summary
+    from desloppify.core.config import load_config as _load_config
+
+    _cfg = _load_config()
+    if _cfg.get("commit_tracking_enabled", True):
+        from desloppify.engine.plan import commit_tracking_summary as _ct_summary
+
+        ct = _ct_summary(plan)
+        if ct["total"] > 0:
+            pr_num = _cfg.get("commit_pr", 0)
+            pr_str = f"  PR: #{pr_num}" if pr_num else ""
+            print(
+                f"  Commit tracking:  {ct['uncommitted']} uncommitted, "
+                f"{ct['committed']} committed ({ct['total']} findings){pr_str}"
+            )
+
 
 def _cmd_plan_reset(args: argparse.Namespace) -> None:
     """Reset the plan to empty."""
     plan = load_plan()
+    queue_len = len(plan.get("queue_order", []))
+    cluster_count = len(plan.get("clusters", {}))
     reset_plan(plan)
+    append_log_entry(
+        plan, "reset", actor="user",
+        detail={"previous_queue_size": queue_len, "previous_cluster_count": cluster_count},
+    )
     save_plan(plan)
     print(colorize("  Plan reset to empty.", "green"))
 
@@ -119,10 +153,16 @@ def cmd_plan(args: argparse.Namespace) -> None:
         cmd_cluster_dispatch(args)
         return
 
-    if plan_action == "synthesize":
-        from desloppify.app.commands.plan.synthesize_handlers import cmd_plan_synthesize
+    if plan_action == "triage":
+        from desloppify.app.commands.plan.triage_handlers import cmd_plan_triage
 
-        cmd_plan_synthesize(args)
+        cmd_plan_triage(args)
+        return
+
+    if plan_action == "commit-log":
+        from desloppify.app.commands.plan.commit_log_handlers import cmd_commit_log_dispatch
+
+        cmd_commit_log_dispatch(args)
         return
 
     print(f"Unknown plan action: {plan_action}")

@@ -6,7 +6,7 @@ import logging
 import re
 from pathlib import Path
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.core.fallbacks import log_best_effort_failure
 from desloppify.core.discovery_api import find_ts_files, rel
 from desloppify.core.output_api import colorize, print_table

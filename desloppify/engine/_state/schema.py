@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Literal, NotRequired, Required, TypedDict
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.core.enums import canonical_finding_status, finding_status_tokens
+from desloppify.engine._state.schema_scores import (
+    get_objective_score,
+    get_overall_score,
+    get_strict_score,
+    get_verified_strict_score,
+    json_default,
+)
 from desloppify.languages._framework.base.types import ScanCoverageRecord
 
 __all__ = [
@@ -306,39 +312,3 @@ def validate_state_invariants(state: StateModel) -> None:
                 f"finding {finding_id!r} has invalid reopen_count {reopen_count!r}"
             )
 
-
-def json_default(obj: Any) -> Any:
-    """JSON serializer that handles known types and rejects unknowns."""
-    if isinstance(obj, set):
-        return sorted(obj)
-    if isinstance(obj, Path):
-        return str(obj).replace("\\", "/")
-    if hasattr(obj, "isoformat"):
-        return obj.isoformat()
-    raise TypeError(
-        f"Object of type {type(obj).__name__} is not JSON serializable: {obj!r}"
-    )
-
-
-def get_overall_score(state: StateModel) -> float | None:
-    """Canonical overall score (lenient, includes subjective dimensions)."""
-    return state.get("overall_score")
-
-
-def get_objective_score(state: StateModel) -> float | None:
-    """Canonical objective score (lenient, mechanical dimensions only)."""
-    return state.get("objective_score")
-
-
-def get_strict_score(state: StateModel) -> float | None:
-    """Canonical strict score (strict, includes subjective dimensions)."""
-    return state.get("strict_score")
-
-
-def get_verified_strict_score(state: StateModel) -> float | None:
-    """Strict score that only credits scan-verified fixes.
-
-    Returns None if no scan-verified score exists yet (fresh state or
-    no scan has run). Does not fall back to the unverified strict_score.
-    """
-    return state.get("verified_strict_score")

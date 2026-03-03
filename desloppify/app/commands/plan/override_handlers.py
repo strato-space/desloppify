@@ -12,16 +12,20 @@ from desloppify.app.commands.helpers.state import require_completed_scan, state_
 from desloppify.app.commands.plan._resolve import resolve_ids_from_patterns
 from desloppify.app.commands.resolve.selection import (
     show_attestation_requirement,
+    show_note_length_requirement,
     validate_attestation,
+    validate_note_length,
 )
 from desloppify.core.output_api import colorize
 from desloppify.engine.plan import (
     annotate_finding,
+    append_log_entry,
     clear_focus,
     describe_finding,
     PLAN_FILE,
     load_plan,
     plan_path_for_state,
+    purge_ids,
     save_plan,
     set_focus,
     skip_items,
@@ -100,6 +104,10 @@ def cmd_plan_describe(args: argparse.Namespace) -> None:
 
     for fid in finding_ids:
         describe_finding(plan, fid, text or None)
+    append_log_entry(
+        plan, "describe", finding_ids=finding_ids, actor="user",
+        detail={"text": text or None},
+    )
     save_plan(plan)
     print(colorize(f"  Set description on {len(finding_ids)} finding(s).", "green"))
 
@@ -121,6 +129,10 @@ def cmd_plan_note(args: argparse.Namespace) -> None:
 
     for fid in finding_ids:
         annotate_finding(plan, fid, text)
+    append_log_entry(
+        plan, "note", finding_ids=finding_ids, actor="user",
+        note=text,
+    )
     save_plan(plan)
     print(colorize(f"  Set note on {len(finding_ids)} finding(s).", "green"))
 
@@ -197,6 +209,16 @@ def cmd_plan_skip(args: argparse.Namespace) -> None:
         review_after=review_after,
         scan_count=scan_count,
     )
+
+    # Log the skip action
+    append_log_entry(
+        plan,
+        "skip",
+        finding_ids=finding_ids,
+        actor="user",
+        note=note,
+        detail={"kind": kind, "reason": reason},
+    )
     if state_data is not None:
         _save_plan_state_transactional(
             plan=plan,
@@ -232,6 +254,10 @@ def cmd_plan_unskip(args: argparse.Namespace) -> None:
         return
 
     count, need_reopen = unskip_items(plan, finding_ids)
+    append_log_entry(
+        plan, "unskip", finding_ids=finding_ids, actor="user",
+        detail={"need_reopen": need_reopen},
+    )
 
     # Reopen permanent/false_positive items in state
     reopened: list[str] = []
@@ -277,6 +303,11 @@ def cmd_plan_reopen(args: argparse.Namespace) -> None:
 
     # Remove from skipped if present, and ensure all reopened IDs are in queue
     plan = load_plan(plan_file)
+
+    # Remove from commit tracking uncommitted list
+    from desloppify.engine.plan import purge_uncommitted_ids as _purge_uncommitted
+    _purge_uncommitted(plan, reopened)
+
     skipped = plan.get("skipped", {})
     count = 0
     order = set(plan.get("queue_order", []))
@@ -288,6 +319,9 @@ def cmd_plan_reopen(args: argparse.Namespace) -> None:
             plan["queue_order"].append(fid)
             order.add(fid)
             count += 1
+    append_log_entry(
+        plan, "reopen", finding_ids=reopened, actor="user",
+    )
     _save_plan_state_transactional(
         plan=plan,
         plan_path=plan_file,
@@ -300,10 +334,106 @@ def cmd_plan_reopen(args: argparse.Namespace) -> None:
         print(colorize(f"  Plan updated: items moved back to queue.", "dim"))
 
 
+_CLUSTER_INDIVIDUAL_THRESHOLD = 10
+
+
+def _check_cluster_guard(patterns: list[str], plan: dict, state: dict) -> bool:
+    """Return True if blocked by cluster guard, False if OK to proceed."""
+    clusters = plan.get("clusters", {})
+    findings = state.get("findings", {})
+    for pattern in patterns:
+        if pattern in clusters:
+            cluster = clusters[pattern]
+            # Filter to alive findings only — stale IDs should not count
+            ids = [
+                fid for fid in cluster.get("finding_ids", [])
+                if fid in findings and findings[fid].get("status") == "open"
+            ]
+            if len(ids) == 0:
+                print(colorize(
+                    f"\n  Cluster '{pattern}' is empty — add items before marking it done.\n",
+                    "yellow",
+                ))
+                print(colorize(
+                    f"  Use: desloppify plan cluster add {pattern} <finding-id>",
+                    "dim",
+                ))
+                return True  # blocked
+            if len(ids) <= _CLUSTER_INDIVIDUAL_THRESHOLD:
+                _print_cluster_guard(pattern, ids, state)
+                return True  # blocked
+    return False  # OK
+
+
+def _print_cluster_guard(cluster_name: str, finding_ids: list[str], state: dict) -> None:
+    findings = state.get("findings", {})
+    print(colorize(
+        f"\n  Cluster '{cluster_name}' has {len(finding_ids)} item(s) — mark them done individually first:\n",
+        "yellow",
+    ))
+    for fid in finding_ids:
+        f = findings.get(fid, {})
+        summary = f.get("summary", "(no summary)")[:80]
+        detector = f.get("detector", "?")
+        print(f"    {fid}  [{detector}]  {summary}")
+    print(colorize(
+        f"\n  Use: desloppify resolve <id> --status fixed --note '...' --attest '...'",
+        "dim",
+    ))
+    print(colorize(
+        f"  Or mark each done: desloppify plan done <id> --note '...' --confirm\n",
+        "dim",
+    ))
+
+
+def _is_synthetic_id(fid: str) -> bool:
+    """Return True if the ID is a synthetic workflow/triage item, not a real finding."""
+    return fid.startswith("triage::") or fid.startswith("workflow::") or fid.startswith("subjective::")
+
+
+def _resolve_synthetic_ids(patterns: list[str]) -> tuple[list[str], list[str]]:
+    """Separate synthetic IDs from real finding patterns.
+
+    Returns (synthetic_ids, remaining_patterns).
+    """
+    synthetic = [p for p in patterns if _is_synthetic_id(p)]
+    remaining = [p for p in patterns if not _is_synthetic_id(p)]
+    return synthetic, remaining
+
+
+def _blocked_triage_stages(plan: dict) -> dict[str, list[str]]:
+    """Return ``{stage_id: [blocked_by_ids]}`` for triage stages that can't run yet.
+
+    Uses the dependency graph and confirmed-stage metadata directly —
+    no state needed, no queue item construction.
+    """
+    from desloppify.app.commands.plan.triage_playbook import TRIAGE_STAGE_DEPENDENCIES
+    from desloppify.engine._plan.stale_dimensions import TRIAGE_IDS, TRIAGE_STAGE_IDS
+
+    order_set = set(plan.get("queue_order", []))
+    present = order_set & TRIAGE_IDS
+    if not present:
+        return {}
+
+    confirmed = set(plan.get("epic_triage_meta", {}).get("triage_stages", {}).keys())
+    stage_names = ("observe", "reflect", "organize", "commit")
+
+    blocked: dict[str, list[str]] = {}
+    for sid, name in zip(TRIAGE_STAGE_IDS, stage_names):
+        if sid not in present or name in confirmed:
+            continue
+        deps = TRIAGE_STAGE_DEPENDENCIES.get(name, set())
+        unmet = sorted(
+            f"triage::{dep}" for dep in deps
+            if f"triage::{dep}" in present and dep not in confirmed
+        )
+        if unmet:
+            blocked[sid] = unmet
+    return blocked
+
+
 def cmd_plan_done(args: argparse.Namespace) -> None:
     """Mark findings as fixed — delegates to cmd_resolve for rich UX."""
-    from desloppify.app.commands.resolve.cmd import cmd_resolve
-
     patterns: list[str] = getattr(args, "patterns", [])
     attestation: str | None = getattr(args, "attest", None)
     note: str | None = getattr(args, "note", None)
@@ -316,10 +446,77 @@ def cmd_plan_done(args: argparse.Namespace) -> None:
         attestation = f"I have actually {note} and I am not gaming the score."
         args.attest = attestation
 
+    # Handle synthetic IDs (triage::*, workflow::*, subjective::*) directly
+    synthetic_ids, real_patterns = _resolve_synthetic_ids(patterns)
+    if synthetic_ids:
+        plan = load_plan()
+        # Validate triage dependency chain
+        blocked_map = _blocked_triage_stages(plan)
+        for sid in synthetic_ids:
+            if sid in blocked_map:
+                deps = ", ".join(b.replace("triage::", "") for b in blocked_map[sid])
+                print(colorize(f"  Cannot resolve {sid} — blocked by: {deps}", "red"))
+                print(colorize("  Complete those stages first, or use --force-resolve to override.", "dim"))
+                if not getattr(args, "force_resolve", False):
+                    return
+        purge_ids(plan, synthetic_ids)
+        append_log_entry(
+            plan, "done", finding_ids=synthetic_ids, actor="user", note=note,
+        )
+        save_plan(plan)
+        for sid in synthetic_ids:
+            print(colorize(f"  Resolved: {sid}", "green"))
+        if not real_patterns:
+            return
+        # Continue with remaining real patterns
+        patterns = real_patterns
+        args.patterns = patterns
+
+    # Validate note length
+    if not validate_note_length(note):
+        show_note_length_requirement(note)
+        return
+
     # Pre-validate attestation before delegating (avoids stale hint in resolve)
     if not validate_attestation(attestation):
         show_attestation_requirement("Plan done", attestation, ATTEST_EXAMPLE)
         return
+
+    # Cluster completion guard: block bulk-completing small clusters
+    try:
+        runtime = command_runtime(args)
+        state = runtime.state
+        plan = load_plan()
+        if _check_cluster_guard(patterns, plan, state):
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        plan = None
+
+    # Log the done action (best-effort)
+    try:
+        if plan is None:
+            plan = load_plan()
+        clusters = plan.get("clusters", {})
+        cluster_name = None
+        for p in patterns:
+            if p in clusters:
+                cluster_name = p
+                break
+        append_log_entry(
+            plan,
+            "done",
+            finding_ids=patterns,
+            cluster_name=cluster_name,
+            actor="user",
+            note=note,
+        )
+        save_plan(plan)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(colorize(f"  Note: unable to append plan done log entry ({exc}).", "dim"))
+
+    # Deferred import: cmd_resolve has a heavy import chain that isn't needed
+    # for synthetic-ID handling above.
+    from desloppify.app.commands.resolve.cmd import cmd_resolve
 
     # Build a Namespace that cmd_resolve expects
     resolve_args = argparse.Namespace(
@@ -328,6 +525,7 @@ def cmd_plan_done(args: argparse.Namespace) -> None:
         note=note,
         attest=attestation,
         confirm_batch_wontfix=False,
+        force_resolve=bool(getattr(args, "force_resolve", False)),
         state=getattr(args, "state", None),
         lang=getattr(args, "lang", None),
         path=getattr(args, "path", None),
@@ -344,7 +542,12 @@ def cmd_plan_focus(args: argparse.Namespace) -> None:
 
     plan = load_plan()
     if clear_flag:
+        prev = plan.get("active_cluster")
         clear_focus(plan)
+        append_log_entry(
+            plan, "focus", actor="user",
+            detail={"action": "clear", "previous": prev},
+        )
         save_plan(plan)
         print(colorize("  Focus cleared.", "green"))
         return
@@ -362,6 +565,10 @@ def cmd_plan_focus(args: argparse.Namespace) -> None:
     except ValueError as ex:
         print(colorize(f"  {ex}", "red"))
         return
+    append_log_entry(
+        plan, "focus", cluster_name=cluster_name, actor="user",
+        detail={"action": "set"},
+    )
     save_plan(plan)
     print(colorize(f"  Focused on: {cluster_name}", "green"))
 

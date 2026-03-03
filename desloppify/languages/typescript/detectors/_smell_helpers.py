@@ -9,9 +9,9 @@ in _smell_detectors.py.
 from __future__ import annotations
 
 import re
-from collections.abc import Generator
 
-from desloppify.core._internal.text_utils import strip_c_style_comments
+from desloppify.core.text_api import strip_c_style_comments
+from desloppify.languages.typescript.syntax.scanner import scan_code
 from desloppify.languages.typescript.detectors._smell_effects import (
     detect_dead_useeffects as _detect_dead_useeffects_impl,
 )
@@ -27,39 +27,6 @@ from desloppify.languages.typescript.detectors._smell_effects import (
 from desloppify.languages.typescript.detectors._smell_effects import (
     track_brace_body as _track_brace_body_impl,
 )
-
-
-def scan_code(
-    text: str, start: int = 0, end: int | None = None
-) -> Generator[tuple[int, str, bool], None, None]:
-    """Yield (index, char, in_string) tuples, handling escapes correctly.
-
-    Skips escaped characters (\\x) by advancing +2 instead of +1.
-    Tracks single-quoted, double-quoted, and template literal strings.
-    Correct for \\\\\" (escaped backslash before quote) where prev_ch pattern fails.
-    """
-    i = start
-    limit = end if end is not None else len(text)
-    in_str = None
-    while i < limit:
-        ch = text[i]
-        if in_str:
-            if ch == "\\" and i + 1 < limit:
-                yield (i, ch, True)
-                i += 1
-                yield (i, text[i], True)
-                i += 1
-                continue
-            if ch == in_str:
-                in_str = None
-            yield (i, ch, in_str is not None)
-        else:
-            if ch in ("'", '"', "`"):
-                in_str = ch
-                yield (i, ch, True)
-            else:
-                yield (i, ch, False)
-        i += 1
 
 
 def _strip_ts_comments(text: str) -> str:

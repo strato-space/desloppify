@@ -31,17 +31,19 @@ from desloppify.app.commands.scan.scan_helpers import (
 from desloppify.app.commands.scan.scan_wontfix import (
     augment_with_stale_wontfix_findings as _augment_stale_wontfix_impl,
 )
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.engine import work_queue as issues_mod
 from desloppify.engine import planning as plan_mod
 from desloppify.engine._plan.auto_cluster import auto_cluster_findings
 from desloppify.engine.planning.scan import PlanScanOptions
+from desloppify.engine._plan.operations import append_log_entry
 from desloppify.engine.plan import (
     load_plan,
     reconcile_plan_after_scan,
     save_plan,
+    sync_create_plan_needed,
     sync_stale_dimensions,
-    sync_synthesis_needed,
+    sync_triage_needed,
     sync_unscored_dimensions,
 )
 from desloppify.core.exception_sets import PLAN_LOAD_EXCEPTIONS
@@ -140,9 +142,14 @@ def _sync_stale_dimensions(plan: dict[str, object], state: state_mod.StateModel,
     return bool(sync.changes)
 
 
-def _sync_auto_clusters(plan: dict[str, object], state: state_mod.StateModel) -> bool:
+def _sync_auto_clusters(
+    plan: dict[str, object],
+    state: state_mod.StateModel,
+    *,
+    target_strict: float = 95.0,
+) -> bool:
     """Regenerate automatic task clusters after scan merge."""
-    return bool(auto_cluster_findings(plan, state))
+    return bool(auto_cluster_findings(plan, state, target_strict=target_strict))
 
 
 def _seed_plan_start_scores(plan: dict[str, object], state: state_mod.StateModel) -> bool:
@@ -191,29 +198,67 @@ def _reconcile_plan_post_scan(runtime: "ScanRuntime") -> None:
 
         if _apply_plan_reconciliation(plan, runtime.state, reconcile_plan_after_scan):
             dirty = True
-        if _sync_unscored_dimensions(plan, runtime.state, sync_unscored_dimensions):
+
+        unscored_changed = _sync_unscored_dimensions(plan, runtime.state, sync_unscored_dimensions)
+        if unscored_changed:
             dirty = True
-        if _sync_stale_dimensions(plan, runtime.state, sync_stale_dimensions):
+            append_log_entry(plan, "sync_unscored", actor="system",
+                             detail={"changes": True})
+
+        stale_changed = _sync_stale_dimensions(plan, runtime.state, sync_stale_dimensions)
+        if stale_changed:
             dirty = True
-        if _sync_auto_clusters(plan, runtime.state):
+            append_log_entry(plan, "sync_stale", actor="system",
+                             detail={"changes": True})
+
+        from desloppify.app.commands.helpers.score import target_strict_score_from_config
+        _target_strict = target_strict_score_from_config(runtime.config, fallback=95.0)
+
+        auto_changed = _sync_auto_clusters(
+            plan, runtime.state, target_strict=_target_strict,
+        )
+        if auto_changed:
             dirty = True
-        synth_sync = sync_synthesis_needed(plan, runtime.state)
-        if synth_sync.changes:
+            append_log_entry(plan, "auto_cluster", actor="system",
+                             detail={"changes": True})
+
+        triage_sync = sync_triage_needed(plan, runtime.state)
+        if triage_sync.changes:
             dirty = True
-            if synth_sync.injected:
+            if triage_sync.injected:
                 print(
                     colorize(
-                        "  Plan: synthesis needed — review findings changed since last synthesis.",
+                        "  Plan: planning mode needed — review findings changed since last triage.",
                         "cyan",
                     )
                 )
+                append_log_entry(plan, "sync_triage", actor="system",
+                                 detail={"injected": True})
+
+        create_plan_sync = sync_create_plan_needed(plan, runtime.state)
+        if create_plan_sync.changes:
+            dirty = True
+            if create_plan_sync.injected:
+                print(
+                    colorize(
+                        "  Plan: reviews complete — `workflow::create-plan` queued.",
+                        "cyan",
+                    )
+                )
+                append_log_entry(plan, "sync_create_plan", actor="system",
+                                 detail={"injected": True})
+
         seeded = _seed_plan_start_scores(plan, runtime.state)
         if seeded:
             dirty = True
+            append_log_entry(plan, "seed_start_scores", actor="system",
+                             detail={})
         # Only clear scores that existed before this reconcile pass —
         # never clear scores we just seeded in the same scan.
         if not seeded and _clear_plan_start_scores_if_queue_empty(runtime.state, plan):
             dirty = True
+            append_log_entry(plan, "clear_start_scores", actor="system",
+                             detail={})
 
         if dirty:
             save_plan(plan, plan_path)

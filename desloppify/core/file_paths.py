@@ -7,7 +7,7 @@ import tempfile
 import fnmatch
 from pathlib import Path
 
-from desloppify.core._internal.text_utils import get_project_root
+from desloppify.core.text_api import get_project_root
 
 
 def matches_exclusion(rel_path: str, exclusion: str) -> bool:
@@ -26,7 +26,7 @@ def matches_exclusion(rel_path: str, exclusion: str) -> bool:
                 return True
     if "/" in exclusion or os.sep in exclusion:
         normalized = exclusion.rstrip("/").rstrip(os.sep)
-        return rel_path.startswith(normalized + "/") or rel_path.startswith(
+        return rel_path == normalized or rel_path.startswith(normalized + "/") or rel_path.startswith(
             normalized + os.sep
         )
     return False

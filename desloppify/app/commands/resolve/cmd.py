@@ -1,4 +1,4 @@
-"""Resolve findings or apply ignore-pattern suppressions."""
+"""Resolve command handlers."""
 
 from __future__ import annotations
 
@@ -7,52 +7,42 @@ import sys
 
 from desloppify import state as state_mod
 from desloppify.app.commands.helpers.lang import resolve_lang
-from desloppify.app.commands.helpers.query import write_query
-from desloppify.app.commands.helpers.runtime import command_runtime
 from desloppify.app.commands.helpers.queue_progress import show_score_with_plan_context
 from desloppify.app.commands.helpers.state import state_path
-from desloppify.core import config as config_mod
-from desloppify.core.fallbacks import print_error
-from desloppify.engine.work_queue import ATTEST_EXAMPLE
-from desloppify.engine.plan import has_living_plan, load_plan, purge_ids, save_plan
+from desloppify.app.commands.helpers.guardrails import require_triage_current_or_exit
+from desloppify.core import config as config_mod  # noqa: F401 (compat export)
+from desloppify.core.output_api import colorize
+from desloppify.engine.plan import (
+    add_uncommitted_findings,
+    append_log_entry,
+    has_living_plan,
+    load_plan,
+    purge_ids,
+    purge_uncommitted_ids,
+    save_plan,
+)
 from desloppify.intelligence import narrative as narrative_mod
 from desloppify.state import coerce_assessment_score
-from desloppify.core.output_api import colorize
-from desloppify.core.tooling import check_config_staleness
 
 from .apply import _resolve_all_patterns, _write_resolve_query_entry
+from .ignore_cmd import cmd_ignore_pattern
+from .persist import _save_state_or_exit
+from .queue_guard import _check_queue_order_guard
 from .render import (
     _print_next_command,
     _print_resolve_summary,
     _print_subjective_reset_hint,
     _print_wontfix_batch_warning,
+    render_commit_guidance,
 )
 from .selection import (
     ResolveQueryContext,
     _enforce_batch_wontfix_confirmation,
     _previous_score_snapshot,
-    show_attestation_requirement,
-    validate_attestation,
     _validate_resolve_inputs,
+    show_note_length_requirement,
+    validate_note_length,
 )
-
-
-def _save_state_or_exit(state: dict, state_file: str) -> None:
-    """Persist state with a consistent CLI error boundary."""
-    try:
-        state_mod.save_state(state, state_file)
-    except OSError as exc:
-        print_error(f"could not save state: {exc}")
-        sys.exit(1)
-
-
-def _save_config_or_exit(config: dict) -> None:
-    """Persist config with a consistent CLI error boundary."""
-    try:
-        config_mod.save_config(config)
-    except OSError as exc:
-        print_error(f"could not save config: {exc}")
-        sys.exit(1)
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
@@ -60,8 +50,25 @@ def cmd_resolve(args: argparse.Namespace) -> None:
     attestation = getattr(args, "attest", None)
     _validate_resolve_inputs(args, attestation)
 
+    if args.status == "fixed":
+        note = getattr(args, "note", None)
+        if not validate_note_length(note):
+            show_note_length_requirement(note)
+            return
+
     state_file = state_path(args)
     state = state_mod.load_state(state_file)
+
+    if _check_queue_order_guard(state, args.patterns, args.status):
+        return
+
+    if args.status == "fixed":
+        require_triage_current_or_exit(
+            state=state,
+            bypass=bool(getattr(args, "force_resolve", False)),
+            attest=getattr(args, "attest", "") or "",
+        )
+
     _enforce_batch_wontfix_confirmation(
         state,
         args,
@@ -78,24 +85,34 @@ def cmd_resolve(args: argparse.Namespace) -> None:
     all_resolved = _resolve_all_patterns(state, args, attestation=attestation)
     if not all_resolved:
         status_label = "resolved" if args.status == "open" else "open"
-        print(
-            colorize(
-                f"No {status_label} findings matching: {' '.join(args.patterns)}",
-                "yellow",
-            )
-        )
+        print(colorize(f"No {status_label} findings matching: {' '.join(args.patterns)}", "yellow"))
         return
 
     _save_state_or_exit(state, state_file)
 
-    # Remove resolved items from the living plan queue (best-effort)
+    plan = None
     try:
         if has_living_plan():
             plan = load_plan()
             purged = purge_ids(plan, all_resolved)
+            append_log_entry(
+                plan,
+                "resolve",
+                finding_ids=all_resolved,
+                actor="user",
+                note=getattr(args, "note", None),
+                detail={"status": args.status, "attestation": attestation},
+            )
+            # Commit tracking: add to uncommitted on fix, remove on reopen
+            if args.status == "fixed":
+                add_uncommitted_findings(plan, all_resolved)
+            elif args.status == "open":
+                purge_uncommitted_ids(plan, all_resolved)
             if purged:
                 save_plan(plan)
                 print(colorize(f"  Plan updated: {purged} item(s) removed from queue.", "dim"))
+            else:
+                save_plan(plan)
     except (OSError, ValueError, KeyError, TypeError):
         print(colorize("  Warning: could not update living plan.", "yellow"), file=sys.stderr)
 
@@ -106,6 +123,7 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         resolved_count=len(all_resolved),
     )
     show_score_with_plan_context(state, prev)
+    render_commit_guidance(state, plan, all_resolved, args.status)
     _print_subjective_reset_hint(
         args=args,
         state=state,
@@ -140,60 +158,4 @@ def cmd_resolve(args: argparse.Namespace) -> None:
     )
 
 
-def cmd_ignore_pattern(args: argparse.Namespace) -> None:
-    """Add a pattern to the ignore list."""
-    attestation = getattr(args, "attest", None)
-    if not validate_attestation(attestation):
-        show_attestation_requirement("Ignore", attestation, ATTEST_EXAMPLE)
-        sys.exit(1)
-
-    runtime = command_runtime(args)
-    state_file = runtime.state_path
-    state = runtime.state
-    prev = state_mod.score_snapshot(state)
-
-    config = runtime.config
-    config_mod.add_ignore_pattern(config, args.pattern)
-    config["needs_rescan"] = True
-    _save_config_or_exit(config)
-
-    removed = state_mod.remove_ignored_findings(state, args.pattern)
-    state.setdefault("attestation_log", []).append(
-        {
-            "timestamp": state.get("last_scan"),
-            "command": "ignore",
-            "pattern": args.pattern,
-            "attestation": attestation,
-            "affected": removed,
-        }
-    )
-    _save_state_or_exit(state, state_file)
-
-    print(colorize(f"Added ignore pattern: {args.pattern}", "green"))
-    if removed:
-        print(f"  Removed {removed} matching findings from state.")
-    config_warning = check_config_staleness(config)
-    if config_warning:
-        print(colorize(f"  {config_warning}", "yellow"))
-    show_score_with_plan_context(state, prev)
-
-    lang = resolve_lang(args)
-    lang_name = lang.name if lang else None
-    narrative = narrative_mod.compute_narrative(
-        state,
-        context=narrative_mod.NarrativeContext(lang=lang_name, command="ignore"),
-    )
-    scores = state_mod.score_snapshot(state)
-    write_query(
-        {
-            "command": "ignore",
-            "pattern": args.pattern,
-            "removed": removed,
-            "overall_score": scores.overall,
-            "objective_score": scores.objective,
-            "strict_score": scores.strict,
-            "verified_strict_score": scores.verified,
-            "attestation": attestation,
-            "narrative": narrative,
-        }
-    )
+__all__ = ["_check_queue_order_guard", "cmd_ignore_pattern", "cmd_resolve"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from desloppify.engine._work_queue.helpers import (
+    ACTION_TYPE_PRIORITY,
     detail_dict,
     is_review_finding,
     is_subjective_finding,
@@ -14,8 +15,71 @@ from desloppify.engine._work_queue.helpers import (
     subjective_strict_scores,
     supported_fixers_for_item,
 )
+from desloppify.core.registry import DETECTORS
 from desloppify.engine.planning.common import CONFIDENCE_ORDER
 from desloppify.state import path_scoped_findings
+
+
+def enrich_with_impact(items: list[dict], dimension_scores: dict) -> None:
+    """Stamp ``estimated_impact`` on each item based on dimension-level headroom.
+
+    Impact = ``overall_per_point * headroom`` where headroom = ``100 - score``.
+    Items in dimensions with more score headroom sort first.
+    """
+    if not dimension_scores:
+        for item in items:
+            item["estimated_impact"] = 0.0
+        return
+
+    from desloppify.engine._scoring.results.health import compute_health_breakdown
+    from desloppify.engine._scoring.results.impact import get_dimension_for_detector
+
+    breakdown = compute_health_breakdown(dimension_scores)
+    entries = breakdown.get("entries", [])
+
+    # Build lookup: normalized dimension name -> {per_point, headroom}
+    dim_impact: dict[str, dict[str, float]] = {}
+    for entry in entries:
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            continue
+        per_point = float(entry.get("overall_per_point", 0.0))
+        score = float(entry.get("score", 0.0))
+        headroom = 100.0 - score
+        dim_impact[name.lower()] = {"per_point": per_point, "headroom": headroom}
+
+    for item in items:
+        impact = _compute_item_impact(item, dim_impact, get_dimension_for_detector)
+        item["estimated_impact"] = impact
+
+
+def _compute_item_impact(
+    item: dict,
+    dim_impact: dict[str, dict[str, float]],
+    get_dimension_for_detector,
+) -> float:
+    """Compute impact value for a single queue item."""
+    kind = item.get("kind", "finding")
+
+    # Subjective items (synthetic dimensions or subjective findings):
+    # look up by detail.dimension_name
+    if kind == "subjective_dimension" or item.get("is_subjective"):
+        dim_name = detail_dict(item).get("dimension_name", "")
+        entry = dim_impact.get(dim_name.lower())
+        if entry:
+            return entry["per_point"] * entry["headroom"]
+        return 0.0
+
+    # Mechanical findings: use detector -> dimension mapping
+    detector = item.get("detector", "")
+    if detector:
+        dimension = get_dimension_for_detector(detector)
+        if dimension:
+            entry = dim_impact.get(dimension.name.lower())
+            if entry:
+                return entry["per_point"] * entry["headroom"]
+
+    return 0.0
 
 
 def subjective_score_value(item: dict) -> float:
@@ -47,14 +111,20 @@ def build_finding_items(
         ):
             continue
 
+        # Evidence-only: skip findings below standalone confidence threshold
+        detector = finding.get("detector", "")
+        meta = DETECTORS.get(detector)
+        if meta and meta.standalone_threshold:
+            threshold_rank = CONFIDENCE_ORDER.get(meta.standalone_threshold, 9)
+            finding_rank = CONFIDENCE_ORDER.get(finding.get("confidence", "low"), 9)
+            if finding_rank > threshold_rank:
+                continue
+
         item = dict(finding)
         item["id"] = finding_id
         item["kind"] = "finding"
         item["is_review"] = is_review_finding(item)
         item["is_subjective"] = is_subjective_finding(item)
-        item["effective_tier"] = (
-            4 if item["is_subjective"] else int(finding.get("tier", 3))
-        )
         item["review_weight"] = (
             review_finding_weight(item) if item["is_review"] else None
         )
@@ -80,32 +150,41 @@ def build_finding_items(
     return out
 
 
-_CLUSTER_ACTION_PRIORITY = {"auto_fix": 0, "reorganize": 1, "refactor": 2, "manual_fix": 3}
-
-
 def item_sort_key(item: dict) -> tuple:
-    if item.get("kind") == "synthesis_needed":
-        # Synthesis items always sort first — they block all other work.
+    kind = item.get("kind", "finding")
+
+    # Initial-review subjective items: highest priority (tier -3)
+    if kind == "subjective_dimension" and item.get("initial_review"):
+        return (-3, 0, subjective_score_value(item), item.get("id", ""))
+
+    # Triage stage items: tier -2, stage order, blocked after unblocked
+    if kind == "workflow_stage":
+        blocked_penalty = 1 if item.get("is_blocked") else 0
+        stage_index = int(item.get("stage_index", 0))
+        return (-2, blocked_penalty, stage_index, item.get("id", ""))
+
+    # Workflow action items (e.g. create-plan): tier -1
+    if kind == "workflow_action":
         return (-1, 0, 0, item.get("id", ""))
 
-    if item.get("kind") == "cluster":
+    if kind == "cluster":
         # Clusters sort before individual findings, ordered by action type
-        # (auto_fix first, then reorganize, refactor, manual_fix),
-        # then bigger clusters first within the same action type.
-        action_pri = _CLUSTER_ACTION_PRIORITY.get(
+        action_pri = ACTION_TYPE_PRIORITY.get(
             item.get("action_type", "manual_fix"), 3
         )
         return (
-            0,  # All clusters before all individual findings
+            0,
             action_pri,
             -int(item.get("member_count", 0)),
             item.get("id", ""),
         )
 
-    if item.get("kind") == "subjective_dimension" or item.get("is_subjective"):
+    impact = item.get("estimated_impact", 0.0)
+
+    if kind == "subjective_dimension" or item.get("is_subjective"):
         return (
-            int(item.get("effective_tier", 4)),
-            1,  # Subjective items sort after mechanical items within T4.
+            1,
+            -impact,
             subjective_score_value(item),
             item.get("id", ""),
         )
@@ -113,8 +192,8 @@ def item_sort_key(item: dict) -> tuple:
     detail = detail_dict(item)
     review_weight = float(item.get("review_weight", 0.0) or 0.0)
     return (
-        int(item.get("effective_tier", item.get("tier", 3))),
-        0,
+        1,
+        -impact,
         CONFIDENCE_ORDER.get(item.get("confidence", "low"), 9),
         -review_weight,
         -int(detail.get("count", 0) or 0),
@@ -123,18 +202,47 @@ def item_sort_key(item: dict) -> tuple:
 
 
 def item_explain(item: dict) -> dict:
-    effective_tier = int(item.get("effective_tier", item.get("tier", 3)))
+    kind = item.get("kind", "finding")
+    if kind == "workflow_stage":
+        return {
+            "kind": "workflow_stage",
+            "stage": item.get("stage_name"),
+            "is_blocked": item.get("is_blocked", False),
+            "blocked_by": item.get("blocked_by", []),
+            "policy": "Triage stages sort by dependency order; blocked stages follow unblocked.",
+            "ranking_factors": ["blocked_penalty asc", "stage_index asc"],
+        }
 
-    if item.get("kind") == "subjective_dimension":
+    if kind == "workflow_action":
+        return {
+            "kind": "workflow_action",
+            "policy": "Workflow items sort after triage stages, before findings.",
+            "ranking_factors": ["id asc"],
+        }
+
+    if kind == "cluster":
+        return {
+            "kind": "cluster",
+            "estimated_impact": item.get("estimated_impact", 0.0),
+            "action_type": item.get("action_type", "manual_fix"),
+            "member_count": item.get("member_count", 0),
+            "policy": "Clusters sort before individual findings, ordered by action type then size.",
+            "ranking_factors": ["action_type asc", "member_count desc", "id asc"],
+        }
+
+    if kind == "subjective_dimension":
+        initial = item.get("initial_review", False)
         return {
             "kind": "subjective_dimension",
-            "effective_tier": effective_tier,
+            "estimated_impact": item.get("estimated_impact", 0.0),
             "subjective_score": subjective_score_value(item),
+            "initial_review": initial,
             "policy": (
-                "Subjective dimensions are always queued as T4 and do not outrank "
-                "mechanical T1/T2/T3 items."
+                "Initial review items sort first (onboarding priority)."
+                if initial else
+                "Sorted by dimension impact (score headroom × weight), then subjective score."
             ),
-            "ranking_factors": ["tier asc", "subjective_score asc", "id asc"],
+            "ranking_factors": ["estimated_impact desc", "subjective_score asc", "id asc"],
         }
 
     detail = detail_dict(item)
@@ -143,20 +251,20 @@ def item_explain(item: dict) -> dict:
     is_review = bool(item.get("is_review"))
     ranking_factors: list[str]
     if is_subjective:
-        ranking_factors = ["tier fixed to T4", "subjective_score asc", "id asc"]
+        ranking_factors = ["estimated_impact desc", "subjective_score asc", "id asc"]
     elif is_review:
         ranking_factors = [
-            "tier asc",
+            "estimated_impact desc",
             "confidence asc",
             "review_weight desc",
             "count desc",
             "id asc",
         ]
     else:
-        ranking_factors = ["tier asc", "confidence asc", "count desc", "id asc"]
+        ranking_factors = ["estimated_impact desc", "confidence asc", "count desc", "id asc"]
     explain = {
         "kind": "finding",
-        "effective_tier": effective_tier,
+        "estimated_impact": item.get("estimated_impact", 0.0),
         "confidence": confidence,
         "confidence_rank": CONFIDENCE_ORDER.get(confidence, 9),
         "count": int(detail.get("count", 0) or 0),
@@ -167,32 +275,10 @@ def item_explain(item: dict) -> dict:
         explain["review_weight"] = float(item.get("review_weight", 0.0) or 0.0)
     if is_subjective:
         explain["policy"] = (
-            "Subjective findings are forced to T4 and do not outrank "
-            "mechanical T1/T2/T3 items."
+            "Sorted by dimension impact (score headroom × weight), then subjective score."
         )
         explain["subjective_score"] = subjective_score_value(item)
     return explain
-
-
-def tier_counts(items: list[dict]) -> dict[int, int]:
-    counts = {1: 0, 2: 0, 3: 0, 4: 0}
-    for item in items:
-        if item.get("kind") == "cluster":
-            # Count each member at its own tier
-            for member in item.get("members", []):
-                tier = int(member.get("effective_tier", member.get("tier", 3)))
-                counts[tier] = counts.get(tier, 0) + 1
-            continue
-        tier = int(item.get("effective_tier", item.get("tier", 3)))
-        counts[tier] = counts.get(tier, 0) + 1
-    return counts
-
-
-def choose_fallback_tier(requested_tier: int, counts: dict[int, int]) -> int | None:
-    available = [tier for tier, count in counts.items() if count > 0]
-    if not available:
-        return None
-    return min(available, key=lambda tier: (abs(tier - requested_tier), tier))
 
 
 def group_queue_items(items: list[dict], group: str) -> dict[str, list[dict]]:
@@ -203,8 +289,6 @@ def group_queue_items(items: list[dict], group: str) -> dict[str, list[dict]]:
             key = item.get("file", "")
         elif group == "detector":
             key = item.get("detector", "")
-        elif group == "tier":
-            key = f"T{int(item.get('effective_tier', item.get('tier', 3)))}"
         elif group == "cluster":
             plan_cluster = item.get("plan_cluster")
             key = plan_cluster["name"] if isinstance(plan_cluster, dict) else "(unclustered)"
@@ -216,10 +300,9 @@ def group_queue_items(items: list[dict], group: str) -> dict[str, list[dict]]:
 
 __all__ = [
     "build_finding_items",
-    "choose_fallback_tier",
+    "enrich_with_impact",
     "item_explain",
     "item_sort_key",
-    "tier_counts",
     "subjective_score_value",
     "group_queue_items",
 ]

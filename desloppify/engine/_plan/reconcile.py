@@ -6,9 +6,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from desloppify.engine._plan.schema import EPIC_PREFIX, PlanModel, SupersededEntry, ensure_plan_defaults
-from desloppify.engine._plan.stale_dimensions import SUBJECTIVE_PREFIX, SYNTHESIS_ID
+from desloppify.engine._plan.stale_dimensions import SYNTHETIC_PREFIXES
 from desloppify.engine._state.schema import StateModel, utc_now
-
 
 SUPERSEDED_TTL_DAYS = 90
 
@@ -82,16 +81,25 @@ def _supersede_id(
 
     plan["superseded"][finding_id] = entry
 
-    # Remove from queue_order, skipped, cluster finding_ids
+    # Remove from queue_order, skipped, promoted_ids, cluster finding_ids
     order: list[str] = plan.get("queue_order", [])
     skipped: dict = plan.get("skipped", {})
+    promoted: list[str] = plan.get("promoted_ids", [])
     if finding_id in order:
         order.remove(finding_id)
     skipped.pop(finding_id, None)
+    if finding_id in promoted:
+        promoted.remove(finding_id)
     for cluster in plan.get("clusters", {}).values():
         ids = cluster.get("finding_ids", [])
         if finding_id in ids:
             ids.remove(finding_id)
+
+    # Clear stale cluster reference from override
+    override = plan.get("overrides", {}).get(finding_id)
+    if override and override.get("cluster"):
+        override["cluster"] = None
+        override["updated_at"] = now
 
     return True
 
@@ -149,8 +157,7 @@ def reconcile_plan_after_scan(
     referenced_ids -= already_superseded
     referenced_ids = {
         fid for fid in referenced_ids
-        if not fid.startswith(SUBJECTIVE_PREFIX)
-        and fid != SYNTHESIS_ID
+        if not any(fid.startswith(prefix) for prefix in SYNTHETIC_PREFIXES)
     }
 
     # Check each referenced ID
@@ -191,10 +198,78 @@ def reconcile_plan_after_scan(
     result.pruned = pruned
     result.changes += len(pruned)
 
+    # Log reconciliation if any changes were made
+    if result.changes > 0:
+        from desloppify.engine._plan.operations import append_log_entry
+
+        append_log_entry(
+            plan,
+            "reconcile",
+            finding_ids=result.superseded,
+            actor="system",
+            detail={
+                "superseded_count": len(result.superseded),
+                "pruned_count": len(result.pruned),
+                "resurfaced_count": len(result.resurfaced),
+            },
+        )
+
     return result
+
+
+@dataclass
+class ReviewImportSyncResult:
+    """Summary of plan changes after a review import."""
+
+    new_ids: set[str]
+    added_to_queue: list[str]
+    triage_injected: bool
+
+
+def sync_plan_after_review_import(
+    plan: PlanModel,
+    state: StateModel,
+) -> ReviewImportSyncResult | None:
+    """Sync plan queue after review import. Pure engine function — no I/O.
+
+    Appends new finding IDs to queue_order and injects triage stages
+    if needed. Returns None when there are no new findings to sync.
+    """
+    from desloppify.engine._plan.stale_dimensions import (
+        compute_new_finding_ids,
+        sync_triage_needed,
+    )
+
+    ensure_plan_defaults(plan)
+    new_ids = compute_new_finding_ids(plan, state)
+    if not new_ids:
+        return None
+
+    # Add new finding IDs to end of queue_order so they have position
+    order: list[str] = plan["queue_order"]
+    existing = set(order)
+    added: list[str] = []
+    for fid in sorted(new_ids):
+        if fid not in existing:
+            order.append(fid)
+            added.append(fid)
+
+    # Inject triage stages if needed
+    triage_result = sync_triage_needed(plan, state)
+    triage_injected = bool(
+        triage_result and getattr(triage_result, "injected", False)
+    )
+
+    return ReviewImportSyncResult(
+        new_ids=new_ids,
+        added_to_queue=added,
+        triage_injected=triage_injected,
+    )
 
 
 __all__ = [
     "ReconcileResult",
+    "ReviewImportSyncResult",
     "reconcile_plan_after_scan",
+    "sync_plan_after_review_import",
 ]

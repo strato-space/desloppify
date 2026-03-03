@@ -58,8 +58,9 @@ class NormalizedBatchFinding:
             "evidence": list(self.evidence),
             "impact_scope": self.impact_scope,
             "fix_scope": self.fix_scope,
-            "reasoning": self.reasoning,
         }
+        if self.reasoning:
+            payload["reasoning"] = self.reasoning
         if self.evidence_lines:
             payload["evidence_lines"] = list(self.evidence_lines)
         return payload
@@ -651,80 +652,13 @@ def merge_batch_results(
     abstraction_component_names: dict[str, str],
 ) -> dict[str, object]:
     """Deterministically merge assessments/findings across batch outputs."""
-    score_buckets: dict[str, list[tuple[float, float]]] = {}
-    score_raw_by_dim: dict[str, list[float]] = {}
-    finding_map: dict[str, dict[str, Any]] = {}
-    merged_dimension_notes: dict[str, dict[str, Any]] = {}
-    coverage_values: list[float] = []
-    evidence_density_values: list[float] = []
-    high_score_missing_issue_note_total = 0.0
-    abstraction_axis_scores: dict[str, list[tuple[float, float]]] = {
-        axis: [] for axis in abstraction_sub_axes
-    }
+    from .batch_merge import merge_batch_results as _merge_batch_results
 
-    for result in batch_results:
-        _accumulate_batch_scores(
-            result,
-            score_buckets=score_buckets,
-            score_raw_by_dim=score_raw_by_dim,
-            merged_dimension_notes=merged_dimension_notes,
-            abstraction_axis_scores=abstraction_axis_scores,
-            abstraction_sub_axes=abstraction_sub_axes,
-        )
-        _accumulate_batch_findings(result, finding_map)
-        high_score_missing_issue_note_total += _accumulate_batch_quality(
-            result,
-            coverage_values=coverage_values,
-            evidence_density_values=evidence_density_values,
-        )
-
-    merged_findings = list(finding_map.values())
-    finding_pressure_by_dim, finding_count_by_dim = _finding_pressure_by_dimension(
-        merged_findings,
-        dimension_notes=merged_dimension_notes,
-    )
-
-    merged_assessments = _compute_merged_assessments(
-        score_buckets, score_raw_by_dim, finding_pressure_by_dim, finding_count_by_dim
-    )
-
-    merged_assessment_payload: dict[str, float | dict[str, object]] = {
-        key: value for key, value in merged_assessments.items()
-    }
-    component_scores = _compute_abstraction_components(
-        merged_assessments,
-        abstraction_axis_scores,
+    return _merge_batch_results(
+        batch_results,
         abstraction_sub_axes=abstraction_sub_axes,
         abstraction_component_names=abstraction_component_names,
     )
-    if component_scores is not None:
-        merged_assessment_payload["abstraction_fitness"] = {
-            "score": merged_assessments["abstraction_fitness"],
-            "components": list(component_scores),
-            "component_scores": component_scores,
-        }
-
-    return {
-        "assessments": merged_assessment_payload,
-        "dimension_notes": merged_dimension_notes,
-        "findings": merged_findings,
-        "review_quality": {
-            "batch_count": len(batch_results),
-            "dimension_coverage": round(
-                sum(coverage_values) / max(len(coverage_values), 1),
-                3,
-            ),
-            "evidence_density": round(
-                sum(evidence_density_values) / max(len(evidence_density_values), 1),
-                3,
-            ),
-            REVIEW_QUALITY_HIGH_SCORE_MISSING_ISSUES_KEY: int(
-                high_score_missing_issue_note_total
-            ),
-            "finding_pressure": round(sum(finding_pressure_by_dim.values()), 3),
-            "dimensions_with_findings": len(finding_count_by_dim),
-        },
-    }
 
 
 def build_batch_prompt(

@@ -252,7 +252,7 @@ def draw_left_panel(
         width=1,
     )
 
-    version_gap = scale(4)
+    version_gap = scale(8)
     ornament_gap = scale(7)
     score_gap = scale(6)
     project_gap = scale(8)

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from desloppify import languages as lang_api
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 
 if TYPE_CHECKING:
     from desloppify.languages._framework.base.types import LangConfig

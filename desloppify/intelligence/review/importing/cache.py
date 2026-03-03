@@ -1,0 +1,74 @@
+"""Review import cache refresh helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from desloppify.core.text_api import get_project_root
+from desloppify.state import utc_now
+
+from desloppify.intelligence.review.importing.state_helpers import _review_file_cache
+
+
+def resolve_import_project_root(project_root: Path | str | None) -> Path:
+    """Resolve optional import project root to an absolute path."""
+    if project_root is None:
+        return get_project_root()
+    return Path(project_root).resolve()
+
+
+def upsert_review_cache_entry(
+    file_cache: dict[str, Any],
+    file_path: str,
+    *,
+    project_root: Path,
+    hash_file_fn,
+    utc_now_fn=utc_now,
+    finding_count: int | None = None,
+) -> None:
+    """Write one normalized review-cache entry for a reviewed file."""
+    absolute = project_root / file_path
+    content_hash = hash_file_fn(str(absolute)) if absolute.exists() else ""
+    if finding_count is None:
+        previous = file_cache.get(file_path, {})
+        count = previous.get("finding_count", 0) if isinstance(previous, dict) else 0
+        finding_count = count if isinstance(count, int) else 0
+    file_cache[file_path] = {
+        "content_hash": content_hash,
+        "reviewed_at": utc_now_fn(),
+        "finding_count": max(0, int(finding_count)),
+    }
+
+
+def refresh_review_file_cache(
+    state: dict[str, Any],
+    *,
+    reviewed_files: list[str] | None,
+    findings_by_file: dict[str, int | None] | None = None,
+    project_root: Path | str | None = None,
+    hash_file_fn,
+    utc_now_fn=utc_now,
+) -> None:
+    """Refresh normalized review cache entries for all reviewed files."""
+    file_cache = _review_file_cache(state)
+    resolved_project_root = resolve_import_project_root(project_root)
+    counts = findings_by_file or {}
+
+    reviewed_set = set(counts)
+    if reviewed_files:
+        reviewed_set.update(
+            str(file_path).strip()
+            for file_path in reviewed_files
+            if isinstance(file_path, str) and str(file_path).strip()
+        )
+
+    for file_path in reviewed_set:
+        upsert_review_cache_entry(
+            file_cache,
+            file_path,
+            project_root=resolved_project_root,
+            hash_file_fn=hash_file_fn,
+            utc_now_fn=utc_now_fn,
+            finding_count=counts.get(file_path),
+        )

@@ -34,7 +34,7 @@ from desloppify.app.output.scorecard_parts.theme import (
     scale,
     score_color,
 )
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.state import get_overall_score, get_strict_score
 
 logger = logging.getLogger(__name__)

@@ -252,7 +252,9 @@ def show_agent_plan(
         print()
 
 
-def show_subjective_followup(state: dict, target_strict_score: float) -> None:
+def show_subjective_followup(
+    state: dict, target_strict_score: float, *, objective_backlog: int = 0,
+) -> None:
     """Show subjective follow-up guidance for the current state."""
     dim_scores = state.get("dimension_scores", {}) or {}
     if not dim_scores:
@@ -272,7 +274,7 @@ def show_subjective_followup(state: dict, target_strict_score: float) -> None:
         max_quality_items=3,
         max_integrity_items=5,
     )
-    if print_subjective_followup(followup):
+    if print_subjective_followup(followup, objective_backlog=objective_backlog):
         print()
 
 

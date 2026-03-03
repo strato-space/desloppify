@@ -41,11 +41,6 @@ def _wq_result(items: list[dict]) -> dict:
     return {
         "items": items,
         "total": len(items),
-        "tier_counts": {},
-        "requested_tier": None,
-        "selected_tier": None,
-        "fallback_reason": None,
-        "available_tiers": [],
         "grouped": {},
     }
 
@@ -696,3 +691,25 @@ def test_merge_skips_preflight():
     ):
         cmd_review(_review_args(merge=True))
         mock_pf.assert_not_called()
+
+
+# -- stale subjective items do not count as blocking backlog -------------------
+
+
+def test_stale_subjective_items_do_not_block_preflight():
+    """Stale re-review items are not counted as blocking backlog in preflight."""
+    state = _state_with_prior_review()
+    stale_items = [
+        {
+            "id": "subjective::naming_quality",
+            "kind": "subjective_dimension",
+            "detail": {"dimension": "naming_quality"},
+            "stale_review": True,
+        }
+    ]
+    with patch(
+        _BUILD_WQ,
+        side_effect=[_wq_result([]), _wq_result(stale_items)],
+    ):
+        # Should NOT raise — stale items don't count as blocking backlog
+        review_rerun_preflight(state, _make_args())

@@ -8,39 +8,67 @@ from typing import Any
 
 from desloppify.core.fallbacks import print_write_error
 
+_CLUSTER_MEMBER_SAMPLE_LIMIT = 25
+
+
+def _serialize_cluster_member(member: Mapping[str, Any]) -> dict[str, Any]:
+    """Serialize a cluster member without nested plan metadata."""
+    return {
+        "id": member.get("id"),
+        "confidence": member.get("confidence"),
+        "detector": member.get("detector"),
+        "file": member.get("file"),
+        "summary": member.get("summary"),
+        "status": member.get("status"),
+        "primary_command": member.get("primary_command"),
+    }
+
 
 def serialize_item(item: Mapping[str, Any]) -> dict[str, Any]:
     """Build a serializable output dict from a queue item."""
     # Cluster meta-items get their own serialization
     if item.get("kind") == "cluster":
         members_raw = item.get("members", [])
-        serialized_members = [serialize_item(m) for m in members_raw]
-        return {
+        serialized_members = [
+            _serialize_cluster_member(member)
+            for member in members_raw[:_CLUSTER_MEMBER_SAMPLE_LIMIT]
+        ]
+        member_count = int(item.get("member_count", len(members_raw)))
+        serialized_cluster: dict[str, Any] = {
             "id": item.get("id"),
             "kind": "cluster",
             "action_type": item.get("action_type", "manual_fix"),
             "summary": item.get("summary"),
-            "member_count": item.get("member_count", len(serialized_members)),
+            "member_count": member_count,
             "members": serialized_members,
-            "primary_command": item.get("primary_command"),
             "cluster_name": item.get("cluster_name", item.get("id")),
             "cluster_auto": item.get("cluster_auto", True),
             "detector": item.get("detector"),
         }
+        if member_count > len(serialized_members):
+            serialized_cluster["members_truncated"] = True
+            serialized_cluster["members_sample_limit"] = _CLUSTER_MEMBER_SAMPLE_LIMIT
+        serialized_cluster["primary_command"] = item.get("primary_command")
+        return serialized_cluster
 
     serialized: dict[str, Any] = {
         "id": item.get("id"),
         "kind": item.get("kind", "finding"),
-        "tier": item.get("tier"),
-        "effective_tier": item.get("effective_tier", item.get("tier")),
         "confidence": item.get("confidence"),
         "detector": item.get("detector"),
         "file": item.get("file"),
         "summary": item.get("summary"),
         "detail": item.get("detail", {}),
         "status": item.get("status"),
-        "primary_command": item.get("primary_command"),
     }
+    serialized["primary_command"] = item.get("primary_command")
+
+    # Workflow dependency state
+    if item.get("blocked_by"):
+        serialized["blocked_by"] = item["blocked_by"]
+    if item.get("is_blocked"):
+        serialized["is_blocked"] = True
+
     explain = item.get("explain")
     if explain is not None:
         serialized["explain"] = explain
@@ -73,17 +101,14 @@ def build_query_payload(
 ) -> dict[str, Any]:
     """Build JSON payload for query.json and non-terminal output modes."""
     serialized = [serialize_item(item) for item in items]
+    queue_section: dict[str, Any] = {
+        "total": queue.get("total", len(items)),
+    }
+
     payload: dict[str, Any] = {
         "command": command,
         "items": serialized,
-        "queue": {
-            "tier_counts": queue.get("tier_counts", {}),
-            "requested_tier": queue.get("requested_tier"),
-            "selected_tier": queue.get("selected_tier"),
-            "fallback_reason": queue.get("fallback_reason"),
-            "available_tiers": queue.get("available_tiers", []),
-            "total": queue.get("total", len(items)),
-        },
+        "queue": queue_section,
         "narrative": narrative,
     }
 
@@ -117,16 +142,15 @@ def render_markdown(items: Sequence[Mapping[str, Any]]) -> str:
     lines = [
         "# Desloppify Next Queue",
         "",
-        "| Kind | Tier | Confidence | Summary | Command |",
-        "|------|------|------------|---------|---------|",
+        "| Kind | Confidence | Summary | Command |",
+        "|------|------------|---------|---------|",
     ]
     for item in items:
         kind = item.get("kind", "finding")
-        tier = int(item.get("effective_tier", item.get("tier", 3)))
         conf = item.get("confidence", "medium")
         summary = item.get("summary", "").replace("|", "\\|")
         command = (item.get("primary_command", "") or "").replace("|", "\\|")
-        lines.append(f"| {kind} | T{tier} | {conf} | {summary} | {command} |")
+        lines.append(f"| {kind} | {conf} | {summary} | {command} |")
     lines.append("")
     return "\n".join(lines)
 

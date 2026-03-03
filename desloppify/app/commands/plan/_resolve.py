@@ -42,6 +42,12 @@ def resolve_ids_from_patterns(
             # Literal plan ID (e.g. subjective::foo) not in state findings
             seen.add(pattern)
             result.append(pattern)
+        elif plan is not None and pattern in plan.get("clusters", {}):
+            # Cluster name → expand to member IDs
+            for fid in plan["clusters"][pattern].get("finding_ids", []):
+                if fid not in seen:
+                    seen.add(fid)
+                    result.append(fid)
     return result
 
 

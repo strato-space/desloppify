@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.engine.policy.zones import FileZoneMap, Zone
 
 from .heuristics import _has_testable_logic, _is_runtime_entrypoint

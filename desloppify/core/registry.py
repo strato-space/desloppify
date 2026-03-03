@@ -54,6 +54,7 @@ class DetectorMeta:
     tool: str = ""  # "move" or empty
     structural: bool = False  # Merges under "structural" in display
     needs_judgment: bool = False  # Findings need LLM design judgment (vs clear-cut fixes)
+    standalone_threshold: str | None = None  # Min confidence for standalone queue item
 
 
 DETECTORS: dict[str, DetectorMeta] = {
@@ -89,6 +90,7 @@ DETECTORS: dict[str, DetectorMeta] = {
         "fix code smells — dead useEffect, empty if chains",
         fixers=("dead-useeffect", "empty-if-chain"),
         needs_judgment=True,
+        standalone_threshold="medium",
     ),
     # ── Reorganize (move tool) ────────────────────────────
     "orphaned": DetectorMeta(
@@ -125,6 +127,7 @@ DETECTORS: dict[str, DetectorMeta] = {
         "rename files with `desloppify move` to fix conventions",
         tool="move",
         needs_judgment=True,
+        standalone_threshold="medium",
     ),
     "single_use": DetectorMeta(
         "single_use",
@@ -178,6 +181,7 @@ DETECTORS: dict[str, DetectorMeta] = {
         "refactor",
         "split bloated components, extract sub-components",
         needs_judgment=True,
+        standalone_threshold="medium",
     ),
     "react": DetectorMeta(
         "react",
@@ -186,6 +190,7 @@ DETECTORS: dict[str, DetectorMeta] = {
         "refactor",
         "refactor React antipatterns (state sync, provider nesting, hook bloat)",
         needs_judgment=True,
+        standalone_threshold="medium",
     ),
     "dupes": DetectorMeta(
         "dupes",
@@ -194,6 +199,7 @@ DETECTORS: dict[str, DetectorMeta] = {
         "refactor",
         "extract shared utility or consolidate duplicates",
         needs_judgment=True,
+        standalone_threshold="medium",
     ),
     "patterns": DetectorMeta(
         "patterns",
@@ -202,6 +208,7 @@ DETECTORS: dict[str, DetectorMeta] = {
         "refactor",
         "align to single pattern across the codebase",
         needs_judgment=True,
+        standalone_threshold="medium",
     ),
     "dict_keys": DetectorMeta(
         "dict_keys",
@@ -211,6 +218,7 @@ DETECTORS: dict[str, DetectorMeta] = {
         "fix dict key mismatches — dead writes are likely dead code, "
         "schema drift suggests a typo or missed rename",
         needs_judgment=True,
+        standalone_threshold="medium",
     ),
     "test_coverage": DetectorMeta(
         "test_coverage",

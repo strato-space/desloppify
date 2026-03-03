@@ -272,6 +272,7 @@ def import_holistic_findings(
     review_scope = findings_data.get("review_scope", {})
     if not isinstance(review_scope, dict):
         review_scope = {}
+    review_scope.setdefault("full_sweep_included", None)
     scope_full_sweep = review_scope.get("full_sweep_included")
     if not isinstance(scope_full_sweep, bool):
         scope_full_sweep = None

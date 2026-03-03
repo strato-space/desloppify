@@ -8,7 +8,7 @@ import re
 from collections import deque
 from pathlib import Path
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.hook_registry import get_lang_hook
 from desloppify.engine.detectors.test_coverage.io import read_coverage_file
 

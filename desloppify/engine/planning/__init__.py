@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from desloppify.engine.planning.common import CONFIDENCE_ORDER, TIER_LABELS
+from desloppify.engine.planning.common import CONFIDENCE_ORDER
 
 
 def generate_plan_md(*args: Any, **kwargs: Any):
@@ -33,7 +33,6 @@ def get_next_items(*args: Any, **kwargs: Any):
 
 __all__ = [
     "CONFIDENCE_ORDER",
-    "TIER_LABELS",
     "generate_findings",
     "generate_plan_md",
     "get_next_item",

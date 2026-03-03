@@ -26,11 +26,9 @@ def _subjective_threshold(state: dict[str, Any], *, default: float = 95.0) -> fl
 
 @dataclass(frozen=True, slots=True)
 class OpenPlanQueuePolicy:
-    tier: int | None = None
     count: int | None = None
     scan_path: str | None = None
     include_subjective: bool = True
-    no_tier_fallback: bool = True
 
 
 def build_open_plan_queue(
@@ -48,13 +46,11 @@ def build_open_plan_queue(
     return build_work_queue(
         state,
         options=QueueBuildOptions(
-            tier=policy.tier,
             count=policy.count,
             scan_path=resolved_scan_path,
             status="open",
             include_subjective=policy.include_subjective,
             subjective_threshold=_subjective_threshold(state),
-            no_tier_fallback=policy.no_tier_fallback,
         ),
     )
 

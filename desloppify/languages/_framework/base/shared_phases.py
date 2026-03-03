@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from desloppify.core._internal.coercions import coerce_confidence
-from desloppify.core._internal.text_utils import get_project_root
+from desloppify.core.coercions_api import coerce_confidence
+from desloppify.core.text_api import get_project_root
 from desloppify.engine.detectors.base import ComplexitySignal
 from desloppify.engine.detectors.complexity import detect_complexity
 from desloppify.engine.detectors.dupes import detect_duplicates
@@ -41,7 +41,6 @@ from desloppify.languages._framework.base.structural import (
 )
 from desloppify.languages._framework.base.types import (
     DetectorCoverageStatus,
-    LangSecurityResult,
 )
 from desloppify.languages._framework.finding_factories import (
     make_cycle_findings,

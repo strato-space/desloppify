@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from desloppify.app.commands.status_parts import render as status_render
+from desloppify.app.commands.status_parts import render_dimensions as render_dims_mod
 
 
 def _subjective_dim(score: float, strict: float, dimension_key: str) -> dict:
@@ -22,7 +23,7 @@ def _subjective_dim(score: float, strict: float, dimension_key: str) -> dict:
 
 def test_status_renders_open_issue_count_for_subjective_dimension(monkeypatch, capsys):
     monkeypatch.setattr(status_render, "colorize", lambda text, _style: text)
-    monkeypatch.setattr(status_render, "dimension_bar", lambda *_args, **_kwargs: "BAR")
+    monkeypatch.setattr(render_dims_mod, "dimension_bar", lambda *_args, **_kwargs: "BAR")
 
     state = {
         "findings": {
@@ -45,7 +46,7 @@ def test_status_renders_open_issue_count_for_subjective_dimension(monkeypatch, c
 
 def test_status_renders_zero_open_issue_hint_for_low_subjective_score(monkeypatch, capsys):
     monkeypatch.setattr(status_render, "colorize", lambda text, _style: text)
-    monkeypatch.setattr(status_render, "dimension_bar", lambda *_args, **_kwargs: "BAR")
+    monkeypatch.setattr(render_dims_mod, "dimension_bar", lambda *_args, **_kwargs: "BAR")
 
     state = {"findings": {}}
     dim_scores = {

@@ -6,6 +6,7 @@ import argparse
 import urllib.error
 import urllib.request
 
+from desloppify.core.path_io_api import safe_write_text
 from desloppify.core.paths_api import get_project_root
 from desloppify.core.skill_docs import (
     SKILL_BEGIN,
@@ -114,7 +115,7 @@ def update_installed_skill(interface: str) -> bool:
     else:
         result = new_section
 
-    target_path.write_text(result, encoding="utf-8")
+    safe_write_text(target_path, result)
 
     version_match = SKILL_VERSION_RE.search(new_section)
     version = version_match.group(1) if version_match else "?"

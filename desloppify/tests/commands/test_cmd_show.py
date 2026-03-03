@@ -313,7 +313,6 @@ class TestCmdShowBackendIntegration:
         monkeypatch.setattr(
             state_mod, "apply_finding_noise_budget", lambda matches, **_k: (matches, {})
         )
-        monkeypatch.setattr(show_cmd_mod, "check_tool_staleness", lambda _state: None)
         monkeypatch.setattr(show_cmd_mod, "compute_narrative", lambda *a, **k: {})
         monkeypatch.setattr(show_cmd_mod, "resolve_lang", lambda _args: None)
 

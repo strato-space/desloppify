@@ -8,7 +8,7 @@ __all__ = [
     "suppression_metrics",
 ]
 
-from desloppify.core._internal.coercions import coerce_confidence
+from desloppify.core.coercions_api import coerce_confidence
 from desloppify.core.enums import finding_status_tokens
 from desloppify.engine._scoring.policy.core import matches_target_score
 from desloppify.engine._state.filtering import path_scoped_findings
@@ -373,6 +373,9 @@ def _update_objective_health(
         if "subjective_assessment" in prev_data.get("detectors", {}):
             continue
         carried = {**prev_data, "carried_forward": True}
+        carried.setdefault("score", 0.0)
+        carried.setdefault("strict", carried.get("score", 0.0))
+        carried.setdefault("strict_score", carried.get("strict", carried.get("score", 0.0)))
         # Backfill for state files written before verified_strict_score existed.
         carried.setdefault(
             "verified_strict_score",

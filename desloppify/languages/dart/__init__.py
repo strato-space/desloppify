@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from desloppify.core._internal.text_utils import get_area
+from desloppify.core.text_api import get_area
 from desloppify.engine.policy.zones import COMMON_ZONE_RULES, Zone, ZoneRule
 from desloppify.hook_registry import register_lang_hooks
 from desloppify.languages import register_lang

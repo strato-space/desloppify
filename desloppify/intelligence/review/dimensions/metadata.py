@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 
-from desloppify.core._internal.text_utils import is_numeric
+from desloppify.core.text_api import is_numeric
 from desloppify.intelligence.review.dimensions.data import (
     load_dimensions,
     load_dimensions_for_lang,
@@ -72,7 +72,7 @@ def _normalize_lang_name(lang_name: str | None) -> str | None:
     return cleaned or None
 
 
-def _extract_prompt_meta(entry: object) -> dict[str, object]:
+def _extract_prompt_meta_impl(entry: object) -> dict[str, object]:
     if not isinstance(entry, dict):
         return {}
     meta = entry.get("meta")
@@ -96,6 +96,11 @@ def _extract_prompt_meta(entry: object) -> dict[str, object]:
         out["reset_on_scan"] = reset_on_scan
 
     return out
+
+
+def _extract_prompt_meta(entry: object) -> dict[str, object]:
+    """Normalize optional prompt metadata into a compact payload."""
+    return _extract_prompt_meta_impl(entry)
 
 
 def _merge_dimension_meta(
@@ -221,10 +226,11 @@ def _metadata_registry(lang_name: str | None) -> dict[str, dict[str, object]]:
     return load_subjective_dimension_metadata_for_lang(normalized)
 
 
-def get_dimension_metadata(
-    dimension_name: str, *, lang_name: str | None = None
+def _dimension_metadata_payload(
+    dimension_name: str,
+    *,
+    lang_name: str | None = None,
 ) -> dict[str, object]:
-    """Return metadata for one dimension key (with sane defaults)."""
     dim = _normalize_dimension_name(dimension_name)
     all_meta = _metadata_registry(lang_name)
     payload = dict(all_meta.get(dim, {}))
@@ -234,6 +240,15 @@ def get_dimension_metadata(
     payload.setdefault("enabled_by_default", False)
     payload.setdefault("reset_on_scan", True)
     return payload
+
+
+def get_dimension_metadata(
+    dimension_name: str,
+    *,
+    lang_name: str | None = None,
+) -> dict[str, object]:
+    """Return metadata for one dimension key (with sane defaults)."""
+    return _dimension_metadata_payload(dimension_name, lang_name=lang_name)
 
 
 def dimension_display_name(dimension_name: str, *, lang_name: str | None = None) -> str:
@@ -259,8 +274,10 @@ def default_display_names_map(*, lang_name: str | None = None) -> dict[str, str]
     return out
 
 
-def resettable_default_dimensions(*, lang_name: str | None = None) -> tuple[str, ...]:
-    """Default subjective dimensions that should be reset by scan reset."""
+def _resettable_default_dimensions_payload(
+    *,
+    lang_name: str | None = None,
+) -> tuple[str, ...]:
     out = []
     for dim, payload in _metadata_registry(lang_name).items():
         if not bool(payload.get("enabled_by_default", False)):
@@ -269,6 +286,11 @@ def resettable_default_dimensions(*, lang_name: str | None = None) -> tuple[str,
             continue
         out.append(dim)
     return tuple(sorted(set(out)))
+
+
+def resettable_default_dimensions(*, lang_name: str | None = None) -> tuple[str, ...]:
+    """Default subjective dimensions that should be reset by scan reset."""
+    return _resettable_default_dimensions_payload(lang_name=lang_name)
 
 
 __all__ = [

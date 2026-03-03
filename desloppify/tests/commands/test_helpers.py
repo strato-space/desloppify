@@ -227,21 +227,16 @@ def test_require_completed_scan_none_last_scan(capsys):
 # ── subjective.py: print_subjective_followup ──────────────────────────
 
 
-def _make_followup(
-    *,
-    low_assessed: bool = False,
-    threshold_label: str = "60",
-    rendered: str = "dim1, dim2",
-    command: str = "desloppify review",
-    integrity_lines: list[tuple[str, str]] | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        low_assessed=low_assessed,
-        threshold_label=threshold_label,
-        rendered=rendered,
-        command=command,
-        integrity_lines=integrity_lines or [],
-    )
+def _make_followup(**overrides) -> SimpleNamespace:
+    payload = {
+        "low_assessed": False,
+        "threshold_label": "60",
+        "rendered": "dim1, dim2",
+        "command": "desloppify review",
+        "integrity_lines": [],
+    }
+    payload.update(overrides)
+    return SimpleNamespace(**payload)
 
 
 def test_subjective_followup_nothing_to_show(capsys):

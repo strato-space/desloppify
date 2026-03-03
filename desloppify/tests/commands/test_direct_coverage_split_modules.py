@@ -63,29 +63,28 @@ def test_merge_potentials_empty():
     assert scoring_detection.merge_potentials({}) == {}
 
 
-def test_item_sort_key_tier_ordering():
-    """item_sort_key orders by tier (lower first)."""
-    t1_item = {"tier": 1, "effective_tier": 1, "confidence": "high", "id": "a"}
-    t3_item = {"tier": 3, "effective_tier": 3, "confidence": "high", "id": "b"}
-    assert work_queue_ranking.item_sort_key(t1_item) < work_queue_ranking.item_sort_key(
-        t3_item
+def test_item_sort_key_confidence_ordering():
+    """item_sort_key orders by confidence (high before low)."""
+    hi_item = {"tier": 1, "confidence": "high", "id": "a"}
+    lo_item = {"tier": 3, "confidence": "low", "id": "b"}
+    assert work_queue_ranking.item_sort_key(hi_item) < work_queue_ranking.item_sort_key(
+        lo_item
     )
 
 
-def test_item_sort_key_review_uses_natural_tier():
-    """Review findings sort by their natural tier like mechanical findings."""
-    review_t2 = {
+def test_item_sort_key_review_uses_confidence():
+    """Review findings sort by confidence like mechanical findings."""
+    review = {
         "is_review": True,
         "review_weight": 1.0,
-        "effective_tier": 2,
         "tier": 2,
-        "confidence": "high",
+        "confidence": "low",
         "id": "r1",
     }
-    t1_item = {"tier": 1, "effective_tier": 1, "confidence": "high", "id": "a"}
-    # T1 mechanical sorts before T2 review
-    assert work_queue_ranking.item_sort_key(t1_item) < work_queue_ranking.item_sort_key(
-        review_t2
+    mech = {"tier": 1, "confidence": "high", "id": "a"}
+    # High confidence sorts before low confidence
+    assert work_queue_ranking.item_sort_key(mech) < work_queue_ranking.item_sort_key(
+        review
     )
 
 
@@ -99,18 +98,6 @@ def test_group_queue_items_by_detector():
     grouped = work_queue_ranking.group_queue_items(items, "detector")
     assert len(grouped["smells"]) == 2
     assert len(grouped["unused"]) == 1
-
-
-def test_group_queue_items_by_tier():
-    """group_queue_items groups items by effective tier."""
-    items = [
-        {"effective_tier": 1, "tier": 1},
-        {"effective_tier": 2, "tier": 2},
-        {"effective_tier": 1, "tier": 1},
-    ]
-    grouped = work_queue_ranking.group_queue_items(items, "tier")
-    assert len(grouped["T1"]) == 2
-    assert len(grouped["T2"]) == 1
 
 
 def test_scoring_policy_dimensions_non_empty():

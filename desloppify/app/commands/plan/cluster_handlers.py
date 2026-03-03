@@ -3,20 +3,39 @@
 from __future__ import annotations
 
 import argparse
+import re
 
 from desloppify.app.commands.helpers.runtime import command_runtime
 from desloppify.app.commands.helpers.state import require_completed_scan
 from desloppify.app.commands.plan._resolve import resolve_ids_from_patterns
 from desloppify.core.output_api import colorize
+from desloppify.app.commands.plan.move_handlers import resolve_target
 from desloppify.engine.plan import (
     add_to_cluster,
+    append_log_entry,
     create_cluster,
     delete_cluster,
     load_plan,
-    move_cluster,
+    merge_clusters,
+    move_items,
     remove_from_cluster,
     save_plan,
 )
+
+
+_LEADING_NUM_RE = re.compile(r'^\d+\.\s*')
+
+
+def _print_pattern_hints() -> None:
+    """Print valid pattern format hints after a no-match error."""
+    print(colorize("  Valid patterns:", "dim"))
+    print(colorize("    f41b3eb7              (8-char hash suffix from dashboard)", "dim"))
+    print(colorize("    review::path::name    (ID prefix)", "dim"))
+    print(colorize("    review                (all findings from detector)", "dim"))
+    print(colorize("    src/foo.py            (all findings in file)", "dim"))
+    print(colorize("    timing_attack         (finding name — last ::segment of ID)", "dim"))
+    print(colorize("    review::*naming*      (glob pattern)", "dim"))
+    print(colorize("    my-cluster            (cluster name — expands to members)", "dim"))
 
 
 def _cmd_cluster_create(args: argparse.Namespace) -> None:
@@ -29,6 +48,10 @@ def _cmd_cluster_create(args: argparse.Namespace) -> None:
     except ValueError as ex:
         print(colorize(f"  {ex}", "red"))
         return
+    append_log_entry(
+        plan, "cluster_create", cluster_name=name, actor="user",
+        detail={"description": description, "action": action},
+    )
     save_plan(plan)
     print(colorize(f"  Created cluster: {name}", "green"))
 
@@ -45,12 +68,33 @@ def _cmd_cluster_add(args: argparse.Namespace) -> None:
     finding_ids = resolve_ids_from_patterns(state, patterns, plan=plan)
     if not finding_ids:
         print(colorize("  No matching findings found.", "yellow"))
+        _print_pattern_hints()
         return
     try:
         count = add_to_cluster(plan, cluster_name, finding_ids)
     except ValueError as ex:
         print(colorize(f"  {ex}", "red"))
         return
+
+    # Check for overlap with other manual clusters
+    member_set = set(finding_ids)
+    for other_name, other_cluster in plan.get("clusters", {}).items():
+        if other_name == cluster_name or other_cluster.get("auto"):
+            continue
+        other_ids = set(other_cluster.get("finding_ids", []))
+        if not other_ids:
+            continue
+        overlap = member_set & other_ids
+        if len(overlap) > len(other_ids) * 0.5:
+            print(colorize(
+                f"  Warning: {len(overlap)} finding(s) also in cluster '{other_name}' "
+                f"({len(overlap)}/{len(other_ids)} = {int(len(overlap)/len(other_ids)*100)}% overlap).",
+                "yellow",
+            ))
+
+    append_log_entry(
+        plan, "cluster_add", finding_ids=finding_ids, cluster_name=cluster_name, actor="user",
+    )
     save_plan(plan)
     print(colorize(f"  Added {count} item(s) to cluster {cluster_name}.", "green"))
 
@@ -67,12 +111,16 @@ def _cmd_cluster_remove(args: argparse.Namespace) -> None:
     finding_ids = resolve_ids_from_patterns(state, patterns, plan=plan)
     if not finding_ids:
         print(colorize("  No matching findings found.", "yellow"))
+        _print_pattern_hints()
         return
     try:
         count = remove_from_cluster(plan, cluster_name, finding_ids)
     except ValueError as ex:
         print(colorize(f"  {ex}", "red"))
         return
+    append_log_entry(
+        plan, "cluster_remove", finding_ids=finding_ids, cluster_name=cluster_name, actor="user",
+    )
     save_plan(plan)
     print(colorize(f"  Removed {count} item(s) from cluster {cluster_name}.", "green"))
 
@@ -85,16 +133,30 @@ def _cmd_cluster_delete(args: argparse.Namespace) -> None:
     except ValueError as ex:
         print(colorize(f"  {ex}", "red"))
         return
+    append_log_entry(
+        plan, "cluster_delete", finding_ids=orphaned, cluster_name=cluster_name, actor="user",
+    )
     save_plan(plan)
     print(colorize(f"  Deleted cluster {cluster_name} ({len(orphaned)} items orphaned).", "green"))
 
 
 def _cmd_cluster_move(args: argparse.Namespace) -> None:
-    cluster_name: str = getattr(args, "cluster_name", "")
+    raw_names: str = getattr(args, "cluster_names", "") or getattr(args, "cluster_name", "")
+    cluster_names: list[str] = [n.strip() for n in raw_names.split(",") if n.strip()]
     position: str = getattr(args, "position", "top")
     target: str | None = getattr(args, "target", None)
 
     plan = load_plan()
+    clusters = plan.get("clusters", {})
+
+    # Validate all names exist
+    for name in cluster_names:
+        if name not in clusters:
+            print(colorize(f"  Cluster {name!r} does not exist.", "red"))
+            return
+
+    # Resolve cluster-name targets for before/after
+    target = resolve_target(plan, target, position)
 
     offset: int | None = None
     if position in ("up", "down") and target is not None:
@@ -105,13 +167,27 @@ def _cmd_cluster_move(args: argparse.Namespace) -> None:
             return
         target = None
 
-    try:
-        count = move_cluster(plan, cluster_name, position, target=target, offset=offset)
-    except ValueError as ex:
-        print(colorize(f"  {ex}", "red"))
+    # Collect all member IDs from all clusters, preserving order, deduplicating
+    seen: set[str] = set()
+    all_member_ids: list[str] = []
+    for name in cluster_names:
+        for fid in clusters[name].get("finding_ids", []):
+            if fid not in seen:
+                seen.add(fid)
+                all_member_ids.append(fid)
+
+    if not all_member_ids:
+        print(colorize("  No members in the specified cluster(s).", "yellow"))
         return
+
+    count = move_items(plan, all_member_ids, position, target=target, offset=offset)
+    append_log_entry(
+        plan, "cluster_move", cluster_name=",".join(cluster_names), actor="user",
+        detail={"position": position, "count": count},
+    )
     save_plan(plan)
-    print(colorize(f"  Moved cluster {cluster_name} ({count} items) to {position}.", "green"))
+    label = ", ".join(cluster_names)
+    print(colorize(f"  Moved cluster(s) {label} ({count} items) to {position}.", "green"))
 
 
 def _print_cluster_member(idx: int, fid: str, finding: dict | None) -> None:
@@ -211,13 +287,50 @@ def _cmd_cluster_update(args: argparse.Namespace) -> None:
         cluster["description"] = description
     if steps is not None:
         cluster["action_steps"] = list(steps)
+        print(colorize(f"  Stored {len(steps)} action step(s):", "dim"))
+        for i, step in enumerate(steps, 1):
+            clean = _LEADING_NUM_RE.sub('', step)
+            print(colorize(f"    {i}. {clean}", "dim"))
+        if len(steps) == 0:
+            print(colorize("  Warning: 0 steps stored. Did you forget the --steps values?", "yellow"))
+        elif len(steps) == 1 and len(steps[0]) > 100:
+            print(colorize("  Warning: only 1 step stored and it's quite long. Check shell quoting.", "yellow"))
     cluster["user_modified"] = True
 
     from desloppify.engine._state.schema import utc_now
 
     cluster["updated_at"] = utc_now()
+    append_log_entry(
+        plan, "cluster_update", cluster_name=cluster_name, actor="user",
+        detail={"description": description, "steps": steps},
+    )
     save_plan(plan)
     print(colorize(f"  Updated cluster: {cluster_name}", "green"))
+
+
+def _cmd_cluster_merge(args: argparse.Namespace) -> None:
+    """Merge source cluster into target cluster."""
+    source: str = getattr(args, "source", "")
+    target: str = getattr(args, "target", "")
+
+    plan = load_plan()
+    try:
+        added, source_ids = merge_clusters(plan, source, target)
+    except ValueError as ex:
+        print(colorize(f"  {ex}", "red"))
+        return
+
+    append_log_entry(
+        plan, "cluster_merge", finding_ids=source_ids,
+        cluster_name=target, actor="user",
+        detail={"source": source, "added": added},
+    )
+    save_plan(plan)
+    print(colorize(
+        f"  Merged cluster {source!r} into {target!r}: "
+        f"{added} finding(s) added, {len(source_ids)} total moved. Source deleted.",
+        "green",
+    ))
 
 
 def cmd_cluster_dispatch(args: argparse.Namespace) -> None:
@@ -232,6 +345,7 @@ def cmd_cluster_dispatch(args: argparse.Namespace) -> None:
         "show": _cmd_cluster_show,
         "list": _cmd_cluster_list,
         "update": _cmd_cluster_update,
+        "merge": _cmd_cluster_merge,
     }
     handler = dispatch.get(cluster_action)
     if handler is None:

@@ -10,7 +10,7 @@ __all__ = [
     "resolve_findings",
 ]
 
-from desloppify.core._internal.text_utils import is_numeric
+from desloppify.core.text_api import is_numeric
 from desloppify.engine._state.filtering import _matches_pattern
 from desloppify.engine._state.schema import (
     StateModel,
@@ -131,13 +131,14 @@ def resolve_findings(
             next_note = note if note is not None else previous_note
             extra_updates["resolved_at"] = None
             extra_updates["note"] = next_note
-            extra_updates["resolution_attestation"] = {
+            reopen_attestation = {
                 "kind": "manual_reopen",
                 "text": attestation or note,
                 "attested_at": now,
                 "scan_verified": False,
-                "previous_status": previous_status,
             }
+            reopen_attestation["previous_status"] = previous_status
+            extra_updates["resolution_attestation"] = reopen_attestation
 
         updates: dict[str, object] = {
             "status": status,

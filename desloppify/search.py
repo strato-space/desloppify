@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 
-from desloppify.core._internal.text_utils import PROJECT_ROOT
+from desloppify.core.text_api import PROJECT_ROOT
 from desloppify.core.runtime_state import current_runtime_context
 
 

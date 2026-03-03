@@ -74,15 +74,15 @@ def test_resolve_lang_prefers_explicit_and_fallbacks(monkeypatch):
 
 def test_get_next_items_orders_by_tier_confidence_and_count():
     finding_a = filtering_mod.make_finding(
-        "smells", "pkg/a.py", "a", tier=3, confidence="low", summary="a"
+        "unused", "pkg/a.py", "a", tier=3, confidence="low", summary="a"
     )
     finding_a["detail"] = {"count": 2}
     finding_b = filtering_mod.make_finding(
-        "smells", "pkg/b.py", "b", tier=2, confidence="medium", summary="b"
+        "unused", "pkg/b.py", "b", tier=2, confidence="medium", summary="b"
     )
     finding_b["detail"] = {"count": 1}
     finding_c = filtering_mod.make_finding(
-        "smells", "other/c.py", "c", tier=2, confidence="high", summary="c"
+        "unused", "other/c.py", "c", tier=2, confidence="high", summary="c"
     )
     finding_c["detail"] = {"count": 10}
 

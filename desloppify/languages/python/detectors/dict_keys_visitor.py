@@ -21,12 +21,41 @@ def _mark_returned_or_passed(visitor: DictKeyVisitor, node: ast.expr) -> None:
         for elt in node.elts:
             _mark_returned_or_passed(visitor, elt)
         return
+    if isinstance(node, ast.List | ast.Set):
+        for elt in node.elts:
+            _mark_returned_or_passed(visitor, elt)
+        return
+    if isinstance(node, ast.Dict):
+        for key in node.keys:
+            if key is not None:
+                _mark_returned_or_passed(visitor, key)
+        for value in node.values:
+            _mark_returned_or_passed(visitor, value)
+        return
     name = _get_name(node)
     if not name:
         return
     tracked = visitor._get_tracked(name)
     if tracked:
         tracked.returned_or_passed = True
+
+
+def _mark_assignment_escape(
+    visitor: DictKeyVisitor,
+    targets: list[ast.expr],
+    value: ast.expr,
+) -> None:
+    """Mark tracked dict as escaped when assigned into container/attribute slots."""
+    name = _get_name(value)
+    if not name:
+        return
+    tracked = visitor._get_tracked(name)
+    if tracked is None:
+        return
+    for target in targets:
+        if isinstance(target, ast.Subscript | ast.Attribute):
+            tracked.returned_or_passed = True
+            return
 
 
 def _record_call_interactions(visitor: DictKeyVisitor, node: ast.Call) -> None:
@@ -292,6 +321,7 @@ class DictKeyVisitor(ast.NodeVisitor):
         # Also check for subscript writes: d["key"] = val
         for target in node.targets:
             self._check_subscript_write(target, node.lineno)
+        _mark_assignment_escape(self, node.targets, node.value)
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:

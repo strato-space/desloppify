@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from typing import Any, Required, TypedDict
 
+from desloppify.engine._plan.schema_migrations import (
+    ensure_container_types as _ensure_container_types,
+    migrate_deferred_to_skipped as _migrate_deferred_to_skipped,
+    migrate_epics_to_clusters as _migrate_epics_to_clusters,
+    migrate_synthesis_to_triage as _migrate_synthesis_to_triage,
+    migrate_v5_to_v6 as _migrate_v5_to_v6,
+    normalize_cluster_defaults as _normalize_cluster_defaults,
+)
 from desloppify.engine._state.schema import utc_now
 
-PLAN_VERSION = 4
+PLAN_VERSION = 7
 
-VALID_SKIP_KINDS = {"temporary", "permanent", "false_positive", "synthesized_out"}
+VALID_SKIP_KINDS = {"temporary", "permanent", "false_positive", "triaged_out"}
 
 EPIC_PREFIX = "epic/"
 VALID_EPIC_DIRECTIONS = {
@@ -49,6 +57,25 @@ class Cluster(TypedDict, total=False):
     user_modified: bool  # True when user manually edits membership
 
 
+class CommitRecord(TypedDict, total=False):
+    sha: Required[str]           # git commit SHA
+    branch: str | None           # branch name
+    finding_ids: list[str]       # findings included
+    recorded_at: str             # ISO timestamp
+    note: str | None             # user-provided rationale
+    cluster_name: str | None     # cluster context
+
+
+class ExecutionLogEntry(TypedDict, total=False):
+    timestamp: Required[str]
+    action: Required[str]  # "done", "skip", "unskip", "resolve", "reconcile", "cluster_done", "focus", "reset"
+    finding_ids: list[str]
+    cluster_name: str | None
+    actor: str  # "user" | "system" | "agent"
+    note: str | None
+    detail: dict  # action-specific extra data
+
+
 class SupersededEntry(TypedDict, total=False):
     original_id: Required[str]
     original_detector: str
@@ -72,8 +99,13 @@ class PlanModel(TypedDict, total=False):
     overrides: dict[str, ItemOverride]
     clusters: dict[str, Cluster]
     superseded: dict[str, SupersededEntry]
+    promoted_ids: list[str]  # IDs user explicitly positioned via move_items()
     plan_start_scores: dict  # frozen score snapshot from plan creation cycle
-    epic_synthesis_meta: dict  # synthesis engine metadata
+    execution_log: list[ExecutionLogEntry]
+    epic_triage_meta: dict  # triage engine metadata
+    commit_log: list[CommitRecord]
+    uncommitted_findings: list[str]
+    commit_tracking_branch: str | None
 
 
 def empty_plan() -> PlanModel:
@@ -90,107 +122,23 @@ def empty_plan() -> PlanModel:
         "overrides": {},
         "clusters": {},
         "superseded": {},
+        "promoted_ids": [],
         "plan_start_scores": {},
-        "epic_synthesis_meta": {},
+        "execution_log": [],
+        "epic_triage_meta": {},
+        "commit_log": [],
+        "uncommitted_findings": [],
+        "commit_tracking_branch": None,
     }
-
-
-def _ensure_container_types(plan: dict[str, Any]) -> None:
-    if not isinstance(plan.get("queue_order"), list):
-        plan["queue_order"] = []
-    if not isinstance(plan.get("deferred"), list):
-        plan["deferred"] = []
-    if not isinstance(plan.get("skipped"), dict):
-        plan["skipped"] = {}
-    if not isinstance(plan.get("overrides"), dict):
-        plan["overrides"] = {}
-    if not isinstance(plan.get("clusters"), dict):
-        plan["clusters"] = {}
-    if not isinstance(plan.get("superseded"), dict):
-        plan["superseded"] = {}
-    if not isinstance(plan.get("plan_start_scores"), dict):
-        plan["plan_start_scores"] = {}
-    if not isinstance(plan.get("epic_synthesis_meta"), dict):
-        plan["epic_synthesis_meta"] = {}
-
-
-def _migrate_deferred_to_skipped(plan: dict[str, Any]) -> None:
-    deferred: list[str] = plan["deferred"]
-    skipped: dict[str, SkipEntry] = plan["skipped"]
-    if not deferred:
-        return
-
-    now = utc_now()
-    for fid in list(deferred):
-        if fid in skipped:
-            continue
-        skipped[fid] = {
-            "finding_id": fid,
-            "kind": "temporary",
-            "reason": None,
-            "note": None,
-            "attestation": None,
-            "created_at": now,
-            "review_after": None,
-            "skipped_at_scan": 0,
-        }
-    deferred.clear()
-
-
-def _normalize_cluster_defaults(plan: dict[str, Any]) -> None:
-    for cluster in plan["clusters"].values():
-        if not isinstance(cluster, dict):
-            continue
-        if not isinstance(cluster.get("finding_ids"), list):
-            cluster["finding_ids"] = []
-        cluster.setdefault("auto", False)
-        cluster.setdefault("cluster_key", "")
-        cluster.setdefault("action", None)
-        cluster.setdefault("user_modified", False)
-
-
-def _migrate_epics_to_clusters(plan: dict[str, Any]) -> None:
-    """Migrate v3 top-level ``epics`` dict into ``clusters`` (v4 unification)."""
-    epics = plan.pop("epics", None)
-    if not isinstance(epics, dict) or not epics:
-        return
-    clusters = plan["clusters"]
-    now = utc_now()
-    for name, epic in epics.items():
-        if not isinstance(epic, dict):
-            continue
-        if name in clusters:
-            continue  # don't overwrite existing cluster
-        clusters[name] = {
-            "name": name,
-            "description": epic.get("thesis", ""),
-            "finding_ids": epic.get("finding_ids", []),
-            "auto": True,
-            "cluster_key": f"epic::{name}",
-            "action": f"desloppify plan focus {name}",
-            "user_modified": False,
-            "created_at": epic.get("created_at", now),
-            "updated_at": epic.get("updated_at", now),
-            # Epic-specific fields
-            "thesis": epic.get("thesis", ""),
-            "direction": epic.get("direction", "simplify"),
-            "root_cause": epic.get("root_cause", ""),
-            "supersedes": epic.get("supersedes", []),
-            "dismissed": epic.get("dismissed", []),
-            "agent_safe": epic.get("agent_safe", False),
-            "dependency_order": epic.get("dependency_order", 999),
-            "action_steps": epic.get("action_steps", []),
-            "source_clusters": epic.get("source_clusters", []),
-            "status": epic.get("status", "pending"),
-            "synthesis_version": epic.get("synthesis_version", 0),
-        }
 
 
 def ensure_plan_defaults(plan: dict[str, Any]) -> None:
     """Normalize a loaded plan to ensure all keys exist.
 
     Handles migration from v1 (deferred list) to v2 (skipped dict),
-    and v3 (top-level epics) to v4 (epics unified into clusters).
+    v3 (top-level epics) to v4 (epics unified into clusters),
+    v5 (gates) to v6 (unified queue),
+    and v6 (synthesis naming) to v7 (triage naming).
     """
     defaults = empty_plan()
     for key, value in defaults.items():
@@ -200,9 +148,11 @@ def ensure_plan_defaults(plan: dict[str, Any]) -> None:
     _migrate_deferred_to_skipped(plan)
     _migrate_epics_to_clusters(plan)
     _normalize_cluster_defaults(plan)
+    _migrate_v5_to_v6(plan)
+    _migrate_synthesis_to_triage(plan)
 
 
-def synthesis_clusters(plan: dict[str, Any]) -> dict[str, Cluster]:
+def triage_clusters(plan: dict[str, Any]) -> dict[str, Cluster]:
     """Return clusters whose name starts with ``EPIC_PREFIX``."""
     return {
         name: cluster
@@ -237,8 +187,10 @@ def validate_plan(plan: dict[str, Any]) -> None:
 
 __all__ = [
     "EPIC_PREFIX",
+    "ExecutionLogEntry",
     "PLAN_VERSION",
     "Cluster",
+    "CommitRecord",
     "ItemOverride",
     "PlanModel",
     "SkipEntry",
@@ -247,6 +199,6 @@ __all__ = [
     "VALID_SKIP_KINDS",
     "empty_plan",
     "ensure_plan_defaults",
-    "synthesis_clusters",
+    "triage_clusters",
     "validate_plan",
 ]

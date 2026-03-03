@@ -13,7 +13,7 @@ from desloppify.engine.detectors.orphaned import (
 )
 from desloppify.core.discovery_api import rel
 from desloppify.languages._framework.commands_base import (
-    build_standard_detect_registry,
+    make_standard_detect_registry_getter,
     make_cmd_complexity,
     make_cmd_large,
 )
@@ -122,13 +122,11 @@ def cmd_dupes(args: argparse.Namespace) -> None:
     print_table(["Function A", "Function B", "Sim", "Kind"], rows, [40, 40, 5, 14])
 
 
-def get_detect_commands() -> dict[str, object]:
-    """Return the standard detect command registry for C#."""
-    return build_standard_detect_registry(
-        cmd_deps=cmd_deps,
-        cmd_cycles=cmd_cycles,
-        cmd_orphaned=cmd_orphaned,
-        cmd_dupes=cmd_dupes,
-        cmd_large=cmd_large,
-        cmd_complexity=cmd_complexity,
-    )
+get_detect_commands = make_standard_detect_registry_getter(
+    cmd_deps=cmd_deps,
+    cmd_cycles=cmd_cycles,
+    cmd_orphaned=cmd_orphaned,
+    cmd_dupes=cmd_dupes,
+    cmd_large=cmd_large,
+    cmd_complexity=cmd_complexity,
+)

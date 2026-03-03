@@ -196,6 +196,39 @@ class TestRemoveIgnoredPreservesStatus:
         assert f["suppressed"] is True
         assert f["status"] == "false_positive"
 
+    def test_directory_pattern_matches_descendants(self):
+        findings = {
+            "security::.claude/worktrees/a/file.py::b101": _make_finding(
+                "security::.claude/worktrees/a/file.py::b101",
+                detector="security",
+                file=".claude/worktrees/a/file.py",
+            ),
+            "security::.claude/file.py::b101": _make_finding(
+                "security::.claude/file.py::b101",
+                detector="security",
+                file=".claude/file.py",
+            ),
+            "security::src/app.py::b101": _make_finding(
+                "security::src/app.py::b101",
+                detector="security",
+                file="src/app.py",
+            ),
+        }
+        state = _minimal_state(findings)
+
+        removed_worktrees = remove_ignored_findings(state, ".claude/worktrees")
+        assert removed_worktrees == 1
+        assert (
+            state["findings"]["security::.claude/worktrees/a/file.py::b101"]["suppressed"]
+            is True
+        )
+        assert state["findings"]["security::.claude/file.py::b101"]["suppressed"] is False
+
+        removed_claude = remove_ignored_findings(state, ".claude")
+        assert removed_claude == 2
+        assert state["findings"]["security::.claude/file.py::b101"]["suppressed"] is True
+        assert state["findings"]["security::src/app.py::b101"]["suppressed"] is False
+
 
 # ---------------------------------------------------------------------------
 # upsert_findings preserves resolved status when ignored

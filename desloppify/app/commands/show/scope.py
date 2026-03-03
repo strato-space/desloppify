@@ -204,14 +204,24 @@ def load_matches(
             status=status_filter,
             include_subjective=False,
             chronic=chronic,
-            no_tier_fallback=True,
         ),
     )
     return [item for item in queue.get("items", []) if item.get("kind") == "finding"]
 
 
-def resolve_noise(config: dict, matches: list[dict]):
-    """Apply detector/global noise budget to show matches."""
+def resolve_noise(config: dict, matches: list[dict], *, no_budget: bool = False):
+    """Apply detector/global noise budget to show matches.
+
+    When *no_budget* is True, all matches are surfaced (nothing hidden).
+    """
+    if no_budget:
+        return (
+            matches,
+            {},
+            0,
+            0,
+            None,
+        )
     noise_budget, global_noise_budget, budget_warning = (
         state_mod.resolve_finding_noise_settings(config)
     )

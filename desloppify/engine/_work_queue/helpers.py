@@ -17,6 +17,7 @@ from desloppify.intelligence.integrity import (
 from desloppify.scoring import DISPLAY_NAMES
 
 ALL_STATUSES = set(finding_status_tokens(include_all=True))
+ACTION_TYPE_PRIORITY = {"auto_fix": 0, "refactor": 1, "manual_fix": 2, "reorganize": 3}
 ATTEST_EXAMPLE = (
     "I have actually [DESCRIBE THE CONCRETE CHANGE YOU MADE] "
     "and I am not gaming the score by resolving without fixing."
@@ -44,6 +45,18 @@ def is_subjective_finding(item: dict) -> bool:
 
 def is_review_finding(item: dict) -> bool:
     return item.get("detector") == "review"
+
+
+def is_subjective_queue_item(item: dict) -> bool:
+    """True for subjective work items, including collapsed subjective clusters."""
+    if item.get("kind") == "subjective_dimension":
+        return True
+    if item.get("kind") == "cluster":
+        members = item.get("members", [])
+        return bool(members) and all(
+            m.get("kind") == "subjective_dimension" for m in members
+        )
+    return False
 
 
 def review_finding_weight(item: dict) -> float:
@@ -168,44 +181,101 @@ def primary_command_for_finding(
     return f'desloppify plan done "{item.get("id", "")}" --note "<what you did>" --confirm'
 
 
-def build_synthesis_item(plan: dict, state: dict) -> dict | None:
-    """Build a synthetic T1 work item for ``synthesis::pending`` if it's in the queue.
+def build_triage_stage_items(plan: dict, state: dict) -> list[dict]:
+    """Build synthetic work items for each ``triage::*`` stage ID in the queue.
 
-    Returns ``None`` when synthesis is not pending.
+    Returns an empty list when no triage stages are pending.
     """
-    from desloppify.engine._plan.stale_dimensions import SYNTHESIS_ID
+    from desloppify.app.commands.plan.triage_playbook import (
+        TRIAGE_STAGE_DEPENDENCIES,
+        TRIAGE_STAGE_LABELS,
+    )
+    from desloppify.engine._plan.stale_dimensions import (
+        TRIAGE_IDS,
+        TRIAGE_STAGE_IDS,
+    )
 
-    if SYNTHESIS_ID not in plan.get("queue_order", []):
-        return None
+    order = plan.get("queue_order", [])
+    order_set = set(order)
+    present = order_set & TRIAGE_IDS
+    if not present:
+        return []
+
+    meta = plan.get("epic_triage_meta", {})
+    confirmed = set(meta.get("triage_stages", {}).keys())
 
     findings = state.get("findings", {})
-    meta = plan.get("epic_synthesis_meta", {})
-
-    open_review_ids = {
-        fid for fid, f in findings.items()
+    open_review_count = sum(
+        1 for f in findings.values()
         if f.get("status") == "open"
         and f.get("detector") in ("review", "concerns")
-    }
-    synthesized_ids = set(meta.get("synthesized_ids", []))
-    new_since = len(open_review_ids - synthesized_ids)
-    resolved_since = len(synthesized_ids - open_review_ids)
+    )
+
+    label_map = dict(TRIAGE_STAGE_LABELS)
+    stage_names = ("observe", "reflect", "organize", "commit")
+
+    items: list[dict] = []
+    for idx, (sid, name) in enumerate(zip(TRIAGE_STAGE_IDS, stage_names)):
+        if sid not in present:
+            continue
+        if name in confirmed:
+            continue
+
+        # Compute blocked_by: dependency stages that are still in the queue
+        deps = TRIAGE_STAGE_DEPENDENCIES.get(name, set())
+        blocked_by = sorted(
+            f"triage::{dep}" for dep in deps
+            if f"triage::{dep}" in present and dep not in confirmed
+        )
+
+        cmd = f"desloppify plan triage --stage {name}"
+        if name == "commit":
+            cmd = 'desloppify plan triage --complete --strategy "..."'
+
+        items.append({
+            "id": sid,
+            "tier": 1,
+            "confidence": "high",
+            "detector": "triage",
+            "file": ".",
+            "kind": "workflow_stage",
+            "stage_name": name,
+            "stage_index": idx,
+            "summary": f"Triage: {label_map.get(name, name)}",
+            "detail": {
+                "total_review_findings": open_review_count,
+                "stage": name,
+                "stage_label": label_map.get(name, name),
+            },
+            "primary_command": cmd,
+            "blocked_by": blocked_by,
+            "is_blocked": bool(blocked_by),
+        })
+    return items
+
+
+def build_create_plan_item(plan: dict) -> dict | None:
+    """Build a synthetic work item for ``workflow::create-plan`` if it's in the queue.
+
+    Returns ``None`` when the item is not pending.
+    """
+    from desloppify.engine._plan.stale_dimensions import WORKFLOW_CREATE_PLAN_ID
+
+    if WORKFLOW_CREATE_PLAN_ID not in plan.get("queue_order", []):
+        return None
 
     return {
-        "id": SYNTHESIS_ID,
+        "id": WORKFLOW_CREATE_PLAN_ID,
         "tier": 1,
         "confidence": "high",
-        "detector": "synthesis",
+        "detector": "workflow",
         "file": ".",
-        "kind": "synthesis_needed",
-        "primary_command": "desloppify plan synthesize",
-        "summary": (
-            f"Synthesize {len(open_review_ids)} review findings into a coherent plan"
-        ),
-        "detail": {
-            "total_review_findings": len(open_review_ids),
-            "new_since_last": new_since,
-            "resolved_since_last": resolved_since,
-        },
+        "kind": "workflow_action",
+        "summary": "Create prioritized plan from review results",
+        "detail": {},
+        "primary_command": "desloppify plan",
+        "blocked_by": [],
+        "is_blocked": False,
     }
 
 
@@ -236,16 +306,65 @@ def subjective_strict_scores(state: dict) -> dict[str, float]:
     return scores
 
 
+def _unassessed_entries_from_dim_scores(dim_scores: dict) -> list[dict]:
+    """Build scorecard-like entries for unassessed placeholder dimensions.
+
+    ``scorecard_subjective_entries`` goes through the scorecard pipeline which
+    intentionally hides placeholders from display.  This function reads
+    ``dimension_scores`` directly so initial-review items are never lost.
+    """
+    entries: list[dict] = []
+    for name, data in dim_scores.items():
+        if not isinstance(data, dict):
+            continue
+        detectors = data.get("detectors", {})
+        meta = detectors.get("subjective_assessment")
+        if not isinstance(meta, dict):
+            continue
+        if not meta.get("placeholder"):
+            continue
+        dim_key = meta.get("dimension_key", "")
+        entries.append(
+            {
+                "name": name,
+                "score": float(data.get("score", 0.0)),
+                "strict": float(data.get("strict", 0.0)),
+                "checks": int(data.get("checks", 0) or 0),
+                "issues": int(data.get("issues", 0) or 0),
+                "tier": int(data.get("tier", 4) or 4),
+                "placeholder": True,
+                "stale": False,
+                "dimension_key": dim_key,
+                "cli_keys": [dim_key] if dim_key else [],
+            }
+        )
+    return entries
+
+
 def build_subjective_items(
     state: dict, findings: dict, *, threshold: float = 100.0
 ) -> list[dict]:
-    """Create synthetic subjective work items (always tier 4)."""
+    """Create synthetic subjective work items."""
     dim_scores = state.get("dimension_scores", {}) or {}
     if not dim_scores:
         return []
     threshold = max(0.0, min(100.0, float(threshold)))
 
     subjective_entries = scorecard_subjective_entries(state, dim_scores=dim_scores)
+
+    # The scorecard pipeline hides unassessed placeholders from display.
+    # Merge them in so initial-review items always appear in the queue.
+    seen_dims: set[str] = {
+        str(e.get("dimension_key", "")).lower()
+        for e in subjective_entries
+        if e.get("dimension_key")
+    }
+    for entry in _unassessed_entries_from_dim_scores(dim_scores):
+        dk = str(entry.get("dimension_key", "")).lower()
+        if dk and dk not in seen_dims:
+            subjective_entries.append(entry)
+            seen_dims.add(dk)
+
     if not subjective_entries:
         return []
     unassessed_dims = {
@@ -305,23 +424,8 @@ def build_subjective_items(
         # before suggesting another review refresh pass.
         if open_review > 0:
             primary_command = "desloppify show review --status open"
-        elif is_unassessed:
-            primary_command = _prepare_command(cli_keys)
-        elif is_stale:
-            primary_command = _prepare_command(
-                cli_keys,
-                force_review_rerun=True,
-            )
-        elif cli_keys:
-            primary_command = _prepare_command(
-                cli_keys,
-                force_review_rerun=True,
-            )
         else:
-            primary_command = _prepare_command(
-                cli_keys,
-                force_review_rerun=True,
-            )
+            primary_command = _prepare_command(cli_keys)
         stale_tag = " [stale — re-review]" if is_stale else ""
         summary = f"Subjective dimension below target: {name} ({strict_val:.1f}%){stale_tag}"
         items.append(
@@ -329,8 +433,6 @@ def build_subjective_items(
                 "id": f"subjective::{slugify(dim_key)}",
                 "detector": "subjective_assessment",
                 "file": ".",
-                "tier": 4,
-                "effective_tier": 4,
                 "confidence": "medium",
                 "summary": summary,
                 "detail": {
@@ -344,6 +446,8 @@ def build_subjective_items(
                 "status": "open",
                 "kind": "subjective_dimension",
                 "primary_command": primary_command,
+                "initial_review": is_unassessed,
+                "stale_review": is_stale and not is_unassessed,
             }
         )
     return items
@@ -352,11 +456,13 @@ def build_subjective_items(
 __all__ = [
     "ALL_STATUSES",
     "ATTEST_EXAMPLE",
+    "build_create_plan_item",
     "build_subjective_items",
-    "build_synthesis_item",
+    "build_triage_stage_items",
     "detail_dict",
     "is_review_finding",
     "is_subjective_finding",
+    "is_subjective_queue_item",
     "primary_command_for_finding",
     "review_finding_weight",
     "scope_matches",

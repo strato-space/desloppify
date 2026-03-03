@@ -211,6 +211,12 @@ def test_injects_when_queue_empty():
 def test_no_injection_when_queue_has_real_items():
     plan = _plan_with_queue("some_finding::file.py::abc123")
     state = _state_with_stale_dimensions("design_coherence")
+    # Add an actual open objective finding to state (source of truth)
+    state["findings"]["some_finding::file.py::abc123"] = {
+        "id": "some_finding::file.py::abc123",
+        "status": "open",
+        "detector": "smells",
+    }
 
     result = sync_stale_dimensions(plan, state)
     assert result.injected == []
@@ -369,6 +375,7 @@ def test_stale_cluster_created():
     assert "desloppify review --prepare --dimensions" in cluster["action"]
     assert "design_coherence" in cluster["action"]
     assert "error_consistency" in cluster["action"]
+    assert "--force-review-rerun" not in cluster["action"]
 
 
 def test_stale_cluster_deleted_when_fresh():
@@ -408,9 +415,12 @@ def test_stale_cluster_updated():
         "subjective::error_consistency",
     }
 
-    # A third dimension becomes stale
+    # A third dimension becomes stale — must also appear in state
     plan["queue_order"].append("subjective::convention_drift")
-    changes = auto_cluster_findings(plan, state)
+    state2 = _state_with_stale_dimensions(
+        "design_coherence", "error_consistency", "convention_drift",
+    )
+    changes = auto_cluster_findings(plan, state2)
     assert changes >= 1
     assert "subjective::convention_drift" in plan["clusters"]["auto/stale-review"]["finding_ids"]
     assert "Re-review 3 stale" in plan["clusters"]["auto/stale-review"]["description"]
@@ -425,3 +435,80 @@ def test_single_stale_dim_no_cluster():
 
     auto_cluster_findings(plan, state)
     assert "auto/stale-review" not in plan["clusters"]
+
+
+# ---------------------------------------------------------------------------
+# Promoted items: system insertions go after user-moved items
+# ---------------------------------------------------------------------------
+
+def test_unscored_respects_promoted_items():
+    """User-moved item stays at the top when unscored dims are injected."""
+    plan = _plan_with_queue("finding_a", "finding_b")
+    plan["promoted_ids"] = ["finding_a"]
+    state = _state_with_unscored_dimensions("design_coherence")
+
+    result = sync_unscored_dimensions(plan, state)
+    assert len(result.injected) == 1
+    # finding_a should still be first (promoted), then the unscored dim
+    assert plan["queue_order"][0] == "finding_a"
+    assert plan["queue_order"][1] == "subjective::design_coherence"
+    assert plan["queue_order"][2] == "finding_b"
+
+
+def test_unscored_multiple_promoted_items():
+    """Multiple promoted items all stay ahead of injected unscored dims."""
+    plan = _plan_with_queue("finding_a", "finding_b", "finding_c")
+    plan["promoted_ids"] = ["finding_a", "finding_b"]
+    state = _state_with_unscored_dimensions("design_coherence", "error_consistency")
+
+    result = sync_unscored_dimensions(plan, state)
+    assert len(result.injected) == 2
+    # Both promoted items should remain at the front
+    assert plan["queue_order"][0] == "finding_a"
+    assert plan["queue_order"][1] == "finding_b"
+    # Unscored dims injected after promoted items
+    assert all(
+        fid.startswith("subjective::")
+        for fid in plan["queue_order"][2:4]
+    )
+    assert plan["queue_order"][4] == "finding_c"
+
+
+def test_no_promoted_preserves_front_insertion():
+    """Without promoted_ids, unscored dims still go to the front (backward compat)."""
+    plan = _plan_with_queue("finding_a", "finding_b")
+    # No promoted_ids set (or empty)
+    state = _state_with_unscored_dimensions("design_coherence")
+
+    result = sync_unscored_dimensions(plan, state)
+    assert len(result.injected) == 1
+    # Unscored dim should be at position 0 (original behavior)
+    assert plan["queue_order"][0] == "subjective::design_coherence"
+    assert plan["queue_order"][1] == "finding_a"
+
+
+def test_triage_respects_promoted_items():
+    """Triage stage IDs go after promoted items, not at position 0."""
+    from desloppify.engine._plan.stale_dimensions import (
+        TRIAGE_STAGE_IDS,
+        sync_triage_needed,
+    )
+
+    plan = _plan_with_queue("finding_a", "finding_b")
+    plan["promoted_ids"] = ["finding_a"]
+    plan["epic_triage_meta"] = {"finding_snapshot_hash": "old_hash"}
+    state = {
+        "findings": {
+            "review::file.py::abc": {"status": "open", "detector": "review"},
+        },
+        "scan_count": 5,
+    }
+
+    result = sync_triage_needed(plan, state)
+    assert result.injected is True
+    # finding_a should still be first (promoted)
+    assert plan["queue_order"][0] == "finding_a"
+    # 4 stage IDs injected after promoted item
+    assert plan["queue_order"][1] == "triage::observe"
+    assert plan["queue_order"][-1] == "finding_b"
+    assert all(sid in plan["queue_order"] for sid in TRIAGE_STAGE_IDS)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from desloppify.core._internal.text_utils import is_numeric
+from desloppify.core.text_api import is_numeric
 from desloppify.engine._scoring.policy.core import SUBJECTIVE_CHECKS
 
 DISPLAY_NAMES: dict[str, str] = {
@@ -80,6 +80,68 @@ def _dimension_weight(dim_name: str, *, lang_name: str | None) -> float:
         return float(dimension_weight(dim_name, lang_name=lang_name))
     except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
         return 1.0
+
+
+def _compute_dimension_score(
+    assessment: dict | None, has_assessment: bool,
+) -> tuple[float, float, float]:
+    """Compute (score, pass_rate, assessment_score) for a dimension."""
+    assessment_score = (
+        max(0.0, min(100.0, float(assessment.get("score", 0))))
+        if isinstance(assessment, dict)
+        else 0.0
+    )
+    integrity_penalty = (
+        assessment.get("integrity_penalty")
+        if isinstance(assessment, dict)
+        else None
+    )
+    reset_pending = bool(
+        isinstance(assessment, dict)
+        and (
+            assessment.get("reset_by") == "scan_reset_subjective"
+            or assessment.get("source") == "scan_reset_subjective"
+            or assessment.get("placeholder") is True
+        )
+    )
+    if reset_pending:
+        score = 0.0
+        pass_rate = 0.0
+    elif integrity_penalty == "target_match_reset":
+        score = 0.0
+        pass_rate = 0.0
+    elif has_assessment:
+        score = assessment_score
+        pass_rate = score / 100.0
+    else:
+        score = 0.0
+        pass_rate = 0.0
+    return score, pass_rate, assessment_score
+
+
+def _extract_components(assessment: dict) -> tuple[list[str], dict[str, float]]:
+    """Extract component names and scores from an assessment dict."""
+    components: list[str] = []
+    component_scores: dict[str, float] = {}
+    raw_components = assessment.get("components")
+    if isinstance(raw_components, list):
+        components = [
+            str(item).strip()
+            for item in raw_components
+            if isinstance(item, str) and item.strip()
+        ]
+    raw_component_scores = assessment.get("component_scores")
+    if isinstance(raw_component_scores, dict):
+        for key, value in raw_component_scores.items():
+            if not isinstance(key, str) or not key.strip():
+                continue
+            if not is_numeric(value):
+                continue
+            component_scores[key.strip()] = round(
+                max(0.0, min(100.0, float(value))),
+                1,
+            )
+    return components, component_scores
 
 
 def append_subjective_dimensions(
@@ -164,15 +226,8 @@ def append_subjective_dimensions(
             == dim_name
         )
 
-        assessment_score = (
-            max(0.0, min(100.0, float(assessment.get("score", 0))))
-            if isinstance(assessment, dict)
-            else 0.0
-        )
-        integrity_penalty = (
-            assessment.get("integrity_penalty")
-            if isinstance(assessment, dict)
-            else None
+        score, pass_rate, assessment_score = _compute_dimension_score(
+            assessment, has_assessment,
         )
         reset_pending = bool(
             isinstance(assessment, dict)
@@ -182,44 +237,10 @@ def append_subjective_dimensions(
                 or assessment.get("placeholder") is True
             )
         )
-        if reset_pending:
-            score = 0.0
-            pass_rate = 0.0
-        elif integrity_penalty == "target_match_reset":
-            score = 0.0
-            pass_rate = 0.0
-        elif has_assessment:
-            # Assessment score drives the dimension score directly.
-            # Resolving review findings does NOT change this score —
-            # only a fresh review import updates it.
-            score = assessment_score
-            pass_rate = score / 100.0
-        else:
-            # No assessment yet: explicit unassessed placeholder.
-            # Subjective dimensions start at 0 until an assessment is imported.
-            score = 0.0
-            pass_rate = 0.0
         components: list[str] = []
         component_scores: dict[str, float] = {}
         if isinstance(assessment, dict):
-            raw_components = assessment.get("components")
-            if isinstance(raw_components, list):
-                components = [
-                    str(item).strip()
-                    for item in raw_components
-                    if isinstance(item, str) and item.strip()
-                ]
-            raw_component_scores = assessment.get("component_scores")
-            if isinstance(raw_component_scores, dict):
-                for key, value in raw_component_scores.items():
-                    if not isinstance(key, str) or not key.strip():
-                        continue
-                    if not is_numeric(value):
-                        continue
-                    component_scores[key.strip()] = round(
-                        max(0.0, min(100.0, float(value))),
-                        1,
-                    )
+            components, component_scores = _extract_components(assessment)
 
         results[display] = {
             "score": round(float(score), 1),

@@ -85,11 +85,28 @@ CONFIG_SCHEMA: dict[str, ConfigKey] = {
         0,
         "Global cap for surfaced findings after per-detector budget (0 = unlimited)",
     ),
+    "execution_log_max_entries": ConfigKey(
+        int, 10000, "Max execution log entries in plan.json (0 = unlimited)"
+    ),
     "needs_rescan": ConfigKey(
         bool, False, "Set when config changes may have invalidated cached scores"
     ),
     "languages": ConfigKey(
         dict, {}, "Language-specific settings {lang_name: {key: value}}"
+    ),
+    "commit_tracking_enabled": ConfigKey(
+        bool, True, "Show commit guidance after resolve and enable PR updates"
+    ),
+    "commit_pr": ConfigKey(
+        int, 0, "Target PR number for commit tracking (0 = not set)"
+    ),
+    "commit_default_branch": ConfigKey(
+        str, "", "Default branch for commit tracking (empty = auto-detect)"
+    ),
+    "commit_message_template": ConfigKey(
+        str,
+        "desloppify: {status} {count} finding(s) — {summary}",
+        "Template for suggested commit messages",
     ),
 }
 

@@ -135,6 +135,11 @@ def test_matches_exclusion_nested_dir_doublestar():
     assert matches_exclusion("src/other/foo.py", "src/vendor/**") is False
 
 
+def test_matches_exclusion_exact_directory_path():
+    """Multi-segment exclusions should match the directory itself, not only children."""
+    assert matches_exclusion(".claude/worktrees", ".claude/worktrees") is True
+
+
 # ── find_source_files() ─────────────────────────────────────
 
 

@@ -1,4 +1,4 @@
-"""Tests for desloppify.plan — plan generation, tier sections, and next-item priority."""
+"""Tests for desloppify.plan — plan generation, item sections, and next-item priority."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from datetime import date
 
 from desloppify.engine.planning.core import (
     CONFIDENCE_ORDER,
-    TIER_LABELS,
     generate_plan_md,
     get_next_item,
     get_next_items,
@@ -14,7 +13,7 @@ from desloppify.engine.planning.core import (
 from desloppify.engine.planning.render import (
     _plan_dimension_table,
     _plan_header,
-    _plan_tier_sections,
+    _plan_item_sections,
 )
 
 # ---------------------------------------------------------------------------
@@ -76,14 +75,11 @@ def _state(
 
 
 # ===========================================================================
-# TIER_LABELS and CONFIDENCE_ORDER constants
+# CONFIDENCE_ORDER constant
 # ===========================================================================
 
 
 class TestConstants:
-    def test_tier_labels_covers_1_through_4(self):
-        assert set(TIER_LABELS.keys()) == {1, 2, 3, 4}
-
     def test_confidence_order_ranking(self):
         assert CONFIDENCE_ORDER["high"] < CONFIDENCE_ORDER["medium"]
         assert CONFIDENCE_ORDER["medium"] < CONFIDENCE_ORDER["low"]
@@ -218,30 +214,30 @@ class TestPlanDimensionTable:
 
 
 # ===========================================================================
-# _plan_tier_sections
+# _plan_item_sections
 # ===========================================================================
 
 
-class TestPlanTierSections:
+class TestPlanItemSections:
     def test_empty_findings_produces_no_sections(self):
-        assert _plan_tier_sections({}) == []
+        assert _plan_item_sections({}) == []
 
-    def test_groups_by_tier(self):
+    def test_groups_by_file(self):
         findings = {
             "a": _finding("a", tier=1, file="x.py"),
             "b": _finding("b", tier=2, file="y.py"),
         }
-        lines = _plan_tier_sections(findings)
+        lines = _plan_item_sections(findings)
         joined = "\n".join(lines)
-        assert "Tier 1:" in joined
-        assert "Tier 2:" in joined
+        assert "x.py" in joined
+        assert "y.py" in joined
 
     def test_skips_non_open_findings(self):
         findings = {
             "a": _finding("a", tier=1, status="fixed"),
             "b": _finding("b", tier=1, status="wontfix"),
         }
-        lines = _plan_tier_sections(findings)
+        lines = _plan_item_sections(findings)
         assert lines == []
 
     def test_files_sorted_by_finding_count_descending(self):
@@ -251,7 +247,7 @@ class TestPlanTierSections:
             "b2": _finding("b2", tier=1, file="many.py"),
             "b3": _finding("b3", tier=1, file="many.py"),
         }
-        lines = _plan_tier_sections(findings)
+        lines = _plan_item_sections(findings)
         # Find the file header lines
         file_headers = [line for line in lines if line.startswith("### ")]
         # "many.py" should come before "few.py"
@@ -264,7 +260,7 @@ class TestPlanTierSections:
             "hi": _finding("hi", tier=1, file="a.py", confidence="high"),
             "md": _finding("md", tier=1, file="a.py", confidence="medium"),
         }
-        lines = _plan_tier_sections(findings)
+        lines = _plan_item_sections(findings)
         bullet_lines = [
             line.strip() for line in lines if line.strip().startswith("- [ ]")
         ]
@@ -276,22 +272,22 @@ class TestPlanTierSections:
         findings = {
             "det::f.py::x": _finding("det::f.py::x", tier=1, file="f.py"),
         }
-        lines = _plan_tier_sections(findings)
+        lines = _plan_item_sections(findings)
         id_lines = [line for line in lines if "det::f.py::x" in line]
         assert len(id_lines) >= 1
 
-    def test_tier_count_in_header(self):
+    def test_open_count_in_header(self):
         findings = {
             "a": _finding("a", tier=2, file="x.py"),
             "b": _finding("b", tier=2, file="y.py"),
             "c": _finding("c", tier=2, file="y.py"),
         }
-        lines = _plan_tier_sections(findings)
-        tier_header = [line for line in lines if line.startswith("## Tier 2:")]
-        assert len(tier_header) == 1
-        assert "3 open" in tier_header[0]
+        lines = _plan_item_sections(findings)
+        section_header = [line for line in lines if line.startswith("## Open Items")]
+        assert len(section_header) == 1
+        assert "3" in section_header[0]
 
-    def test_review_findings_render_under_natural_tier(self):
+    def test_review_findings_render(self):
         findings = {
             "review::src/a.py::naming": _finding(
                 "review::src/a.py::naming",
@@ -301,14 +297,13 @@ class TestPlanTierSections:
                 detail={"dimension": "naming_quality"},
             ),
         }
-        lines = _plan_tier_sections(
+        lines = _plan_item_sections(
             findings, state={"findings": findings, "dimension_scores": {}}
         )
         joined = "\n".join(lines)
-        assert "Tier 2:" in joined
         assert "review::src/a.py::naming" in joined
 
-    def test_subjective_dimensions_show_up_in_tier4_section(self):
+    def test_subjective_dimensions_show_up(self):
         findings: dict[str, dict] = {}
         state = {
             "findings": findings,
@@ -316,9 +311,8 @@ class TestPlanTierSections:
                 "Naming quality": {"score": 94.0, "strict": 94.0, "issues": 2}
             },
         }
-        lines = _plan_tier_sections(findings, state=state)
+        lines = _plan_item_sections(findings, state=state)
         joined = "\n".join(lines)
-        assert "Tier 4:" in joined
         assert "subjective::naming_quality" in joined
 
 
@@ -334,18 +328,12 @@ class TestGeneratePlanMd:
         assert isinstance(md, str)
         assert "Desloppify Plan" in md
 
-    def test_includes_tier_breakdown(self):
+    def test_includes_summary(self):
         st = _state(
-            stats={
-                "by_tier": {
-                    "1": {"open": 5, "fixed": 3},
-                    "2": {"open": 2},
-                },
-            }
+            stats={"open": 7, "fixed": 3, "wontfix": 0, "auto_resolved": 0},
         )
         md = generate_plan_md(st)
-        assert "Tier 1" in md
-        assert "Tier 2" in md
+        assert "7 open" in md
 
     def test_includes_addressed_section(self):
         f_fixed = _finding("a", status="fixed", tier=1)
@@ -384,13 +372,13 @@ class TestGetNextItem:
         assert get_next_item(st) is None
 
     def test_returns_highest_priority_item(self):
-        f1 = _finding("lo_tier", tier=3, confidence="low")
-        f2 = _finding("hi_tier", tier=1, confidence="high")
+        f1 = _finding("lo_conf", tier=3, confidence="low")
+        f2 = _finding("hi_conf", tier=1, confidence="high")
         st = _state([f1, f2])
         result = get_next_item(st)
-        assert result["id"] == "hi_tier"
+        assert result["id"] == "hi_conf"
 
-    def test_confidence_breaks_tier_tie(self):
+    def test_confidence_breaks_tie(self):
         f1 = _finding("low", tier=2, confidence="low")
         f2 = _finding("high", tier=2, confidence="high")
         st = _state([f1, f2])
@@ -404,17 +392,14 @@ class TestGetNextItem:
         result = get_next_item(st)
         assert result["id"] == "many"
 
-    def test_tier_filter(self):
+    def test_tier_param_accepted_but_ignored(self):
+        """tier param is accepted for backward compat but no longer filters."""
         f1 = _finding("t1", tier=1, confidence="high")
         f2 = _finding("t3", tier=3, confidence="high")
         st = _state([f1, f2])
         result = get_next_item(st, tier=3)
-        assert result["id"] == "t3"
-
-    def test_tier_filter_returns_none_if_no_match(self):
-        f = _finding("t1", tier=1)
-        st = _state([f])
-        assert get_next_item(st, tier=4) is None
+        # tier is ignored — returns the first item by confidence/count sort
+        assert result is not None
 
 
 class TestGetNextItems:
@@ -434,23 +419,22 @@ class TestGetNextItems:
         items = get_next_items(st, count=5)
         assert items == []
 
-    def test_sorted_by_priority(self):
-        f1 = _finding("t3_lo", tier=3, confidence="low")
-        f2 = _finding("t1_hi", tier=1, confidence="high")
-        f3 = _finding("t2_md", tier=2, confidence="medium")
+    def test_sorted_by_confidence(self):
+        f1 = _finding("lo", tier=3, confidence="low")
+        f2 = _finding("hi", tier=1, confidence="high")
+        f3 = _finding("md", tier=2, confidence="medium")
         st = _state([f1, f2, f3])
         items = get_next_items(st, count=3)
-        assert items[0]["id"] == "t1_hi"
-        assert items[1]["id"] == "t2_md"
-        assert items[2]["id"] == "t3_lo"
+        assert items[0]["id"] == "hi"
+        assert items[1]["id"] == "md"
+        assert items[2]["id"] == "lo"
 
-    def test_tier_filter_with_count(self):
+    def test_count_limits_results(self):
         findings = [_finding(f"f{i}", tier=2) for i in range(5)]
         findings += [_finding(f"other{i}", tier=3) for i in range(5)]
         st = _state(findings)
-        items = get_next_items(st, tier=2, count=3)
+        items = get_next_items(st, count=3)
         assert len(items) == 3
-        assert all(item["tier"] == 2 for item in items)
 
     def test_id_tiebreaker_is_stable(self):
         """When tier, confidence, and detail count are all the same, sort by ID."""
@@ -506,7 +490,7 @@ class TestGetNextItems:
         ids = {i["id"] for i in items}
         assert ids == {"holistic", "in_scope"}
 
-    def test_review_findings_use_natural_tier(self):
+    def test_review_findings_appear_in_queue(self):
         review = _finding(
             "review_item",
             detector="review",
@@ -520,9 +504,9 @@ class TestGetNextItems:
             subjective_assessments={"naming_quality": {"score": 92}},
         )
         items = get_next_items(st, count=2)
-        # Both are tier 3 — review findings use natural tier, not forced T1
-        assert items[0]["effective_tier"] == 3
-        assert items[1]["effective_tier"] == 3
+        ids = {item["id"] for item in items}
+        assert "review_item" in ids
+        assert "mech_item" in ids
 
     def test_review_findings_reorder_by_confidence_then_review_weight(self):
         standard = _finding(
@@ -547,12 +531,11 @@ class TestGetNextItems:
             },
         )
         items = get_next_items(st, count=2)
-        # Same tier, confidence takes precedence: high before low
+        # Confidence takes precedence: high before low
         assert [item["id"] for item in items] == ["a_review_mild", "z_review_critical"]
-        assert all(item["effective_tier"] == 3 for item in items)
 
-    def test_tier1_mechanical_outranks_tier3_review(self):
-        urgent = _finding("t1_urgent", detector="security", tier=1, confidence="high")
+    def test_mechanical_and_review_both_in_queue(self):
+        urgent = _finding("urgent", detector="security", tier=1, confidence="high")
         review_low = _finding(
             "review_low",
             detector="review",
@@ -565,5 +548,6 @@ class TestGetNextItems:
             subjective_assessments={"naming_quality": {"score": 80}},
         )
         items = get_next_items(st, count=2)
-        # T1 mechanical sorts before T3 review (natural tier ordering)
-        assert [item["id"] for item in items] == ["t1_urgent", "review_low"]
+        ids = {item["id"] for item in items}
+        assert "urgent" in ids
+        assert "review_low" in ids

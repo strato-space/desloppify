@@ -66,7 +66,7 @@ class TestCmdResolve:
 
         class FakeArgs:
             status = "fixed"
-            note = "done"
+            note = "Refactored the module to use proper dependency injection patterns"
             attest = None
             patterns = ["test::a.ts::foo"]
             lang = None
@@ -85,7 +85,7 @@ class TestCmdResolve:
 
         class FakeArgs:
             status = "fixed"
-            note = "done"
+            note = "Refactored the module to use proper dependency injection patterns"
             attest = "I fixed this for real."
             patterns = ["test::a.ts::foo"]
             lang = None
@@ -102,6 +102,7 @@ class TestCmdResolve:
     def test_resolve_no_matches(self, monkeypatch, capsys):
         """When no findings match, should print a warning."""
         monkeypatch.setattr(resolve_mod, "state_path", lambda a: "/tmp/fake.json")
+        monkeypatch.setattr(resolve_mod, "require_triage_current_or_exit", lambda **kwargs: None)
 
         fake_state = {
             "findings": {},
@@ -121,7 +122,7 @@ class TestCmdResolve:
 
         class FakeArgs:
             status = "fixed"
-            note = "done"
+            note = "Refactored the module to use proper dependency injection patterns"
             attest = "I have actually fixed this and I am not gaming the score."
             patterns = ["nonexistent"]
             lang = None
@@ -134,6 +135,7 @@ class TestCmdResolve:
     def test_resolve_successful(self, monkeypatch, capsys):
         """Resolving findings should print a success message."""
         monkeypatch.setattr(resolve_mod, "state_path", lambda a: "/tmp/fake.json")
+        monkeypatch.setattr(resolve_mod, "require_triage_current_or_exit", lambda **kwargs: None)
         monkeypatch.setattr(resolve_apply_mod, "write_query", lambda payload: None)
 
         fake_state = {
@@ -164,7 +166,7 @@ class TestCmdResolve:
 
         class FakeArgs:
             status = "fixed"
-            note = "done"
+            note = "Refactored the module to use proper dependency injection patterns"
             attest = "I have actually fixed this and I am not gaming the score."
             patterns = ["f1"]
             lang = None
@@ -260,6 +262,7 @@ class TestCmdResolve:
 
     def test_resolve_save_state_error_exits(self, monkeypatch, capsys):
         monkeypatch.setattr(resolve_mod, "state_path", lambda a: "/tmp/fake.json")
+        monkeypatch.setattr(resolve_mod, "require_triage_current_or_exit", lambda **kwargs: None)
 
         fake_state = {
             "findings": {"f1": {"status": "fixed"}},
@@ -285,7 +288,7 @@ class TestCmdResolve:
 
         class FakeArgs:
             status = "fixed"
-            note = "done"
+            note = "Refactored the module to use proper dependency injection patterns"
             attest = "I have actually fixed this and I am not gaming the score."
             patterns = ["f1"]
             lang = None

@@ -355,6 +355,111 @@ def _find_typed_dict_usage_violations(
     return violations
 
 
+def _compute_sub_axes(
+    *,
+    wrapper_rate: float,
+    util_files: list,
+    indirection_hotspots: list,
+    wide_param_bags: list,
+    one_impl_interfaces: list,
+    delegation_classes: list,
+    facade_modules: list,
+    typed_dict_violation_files: set,
+    total_typed_dict_violations: int,
+) -> dict[str, float]:
+    """Compute all 6 sub-axis scores for the abstractions dimension."""
+    abstraction_leverage = _score_clamped(
+        100 - (wrapper_rate * 120) - (len(util_files) * 1.5)
+    )
+    indirection_cost = _score_clamped(
+        100
+        - (sum(item["max_chain_depth"] for item in indirection_hotspots[:20]) * 2.5)
+        - (sum(item["wide_functions"] for item in wide_param_bags[:20]) * 2.0)
+    )
+    interface_honesty = _score_clamped(100 - (len(one_impl_interfaces) * 8))
+
+    top10_delegation = delegation_classes[:10]
+    avg_delegation_ratio = (
+        sum(d["delegation_ratio"] for d in top10_delegation) / len(top10_delegation)
+        if top10_delegation
+        else 0.0
+    )
+    delegation_density = _score_clamped(
+        100 - (avg_delegation_ratio * 80) - (len(delegation_classes) * 5)
+    )
+    avg_facade_ratio = (
+        sum(f["re_export_ratio"] for f in facade_modules[:10]) / len(facade_modules[:10])
+        if facade_modules
+        else 0.0
+    )
+    definition_directness = _score_clamped(
+        100 - (len(facade_modules) * 8) - (avg_facade_ratio * 50)
+    )
+    type_discipline = _score_clamped(
+        100
+        - (len(typed_dict_violation_files) * 6)
+        - (total_typed_dict_violations * 1.5)
+    )
+    return {
+        "abstraction_leverage": abstraction_leverage,
+        "indirection_cost": indirection_cost,
+        "interface_honesty": interface_honesty,
+        "delegation_density": delegation_density,
+        "definition_directness": definition_directness,
+        "type_discipline": type_discipline,
+    }
+
+
+def _assemble_context(
+    *,
+    util_files: list,
+    wrapper_rate: float,
+    total_wrappers: int,
+    total_function_signatures: int,
+    wrappers_by_file: list,
+    one_impl_interfaces: list,
+    indirection_hotspots: list,
+    wide_param_bags: list,
+    delegation_classes: list,
+    facade_modules: list,
+    typed_dict_violations: list,
+    total_typed_dict_violations: int,
+    sub_axes: dict[str, float],
+) -> dict:
+    """Build the final context dict from collected data and sub-axis scores."""
+    util_files = sorted(util_files, key=lambda item: -item["loc"])[:20]
+    context: dict[str, object] = {
+        "util_files": util_files,
+        "summary": {
+            "wrapper_rate": round(wrapper_rate, 3),
+            "total_wrappers": total_wrappers,
+            "total_function_signatures": total_function_signatures,
+            "one_impl_interface_count": len(one_impl_interfaces),
+            "indirection_hotspot_count": len(indirection_hotspots),
+            "wide_param_bag_count": len(wide_param_bags),
+            "delegation_heavy_class_count": len(delegation_classes),
+            "facade_module_count": len(facade_modules),
+            "typed_dict_violation_count": total_typed_dict_violations,
+        },
+        "sub_axes": sub_axes,
+    }
+    if wrappers_by_file:
+        context["pass_through_wrappers"] = wrappers_by_file[:20]
+    if one_impl_interfaces:
+        context["one_impl_interfaces"] = one_impl_interfaces[:20]
+    if indirection_hotspots:
+        context["indirection_hotspots"] = indirection_hotspots[:20]
+    if wide_param_bags:
+        context["wide_param_bags"] = wide_param_bags[:20]
+    if delegation_classes:
+        context["delegation_heavy_classes"] = delegation_classes
+    if facade_modules:
+        context["facade_modules"] = facade_modules
+    if typed_dict_violations:
+        context["typed_dict_violations"] = typed_dict_violations
+    return context
+
+
 def _abstractions_context(file_contents: dict[str, str]) -> dict:
     util_files = []
     wrappers_by_file: list[dict[str, object]] = []
@@ -505,77 +610,33 @@ def _abstractions_context(file_contents: dict[str, str]) -> dict:
     # ── Sub-axis scoring ──────────────────────────────────────
 
     wrapper_rate = total_wrappers / max(total_function_signatures, 1)
-    abstraction_leverage = _score_clamped(
-        100 - (wrapper_rate * 120) - (len(util_files) * 1.5)
-    )
-    indirection_cost = _score_clamped(
-        100
-        - (sum(item["max_chain_depth"] for item in indirection_hotspots[:20]) * 2.5)
-        - (sum(item["wide_functions"] for item in wide_param_bags[:20]) * 2.0)
-    )
-    interface_honesty = _score_clamped(100 - (len(one_impl_interfaces) * 8))
-
-    top10_delegation = delegation_classes[:10]
-    avg_delegation_ratio = (
-        sum(d["delegation_ratio"] for d in top10_delegation) / len(top10_delegation)
-        if top10_delegation
-        else 0.0
-    )
-    delegation_density = _score_clamped(
-        100 - (avg_delegation_ratio * 80) - (len(delegation_classes) * 5)
-    )
-    avg_facade_ratio = (
-        sum(f["re_export_ratio"] for f in facade_modules[:10]) / len(facade_modules[:10])
-        if facade_modules
-        else 0.0
-    )
-    definition_directness = _score_clamped(
-        100 - (len(facade_modules) * 8) - (avg_facade_ratio * 50)
-    )
-    type_discipline = _score_clamped(
-        100
-        - (len(typed_dict_violation_files) * 6)
-        - (total_typed_dict_violations * 1.5)
+    sub_axes = _compute_sub_axes(
+        wrapper_rate=wrapper_rate,
+        util_files=util_files,
+        indirection_hotspots=indirection_hotspots,
+        wide_param_bags=wide_param_bags,
+        one_impl_interfaces=one_impl_interfaces,
+        delegation_classes=delegation_classes,
+        facade_modules=facade_modules,
+        typed_dict_violation_files=typed_dict_violation_files,
+        total_typed_dict_violations=total_typed_dict_violations,
     )
 
-    util_files = sorted(util_files, key=lambda item: -item["loc"])[:20]
-    context: dict[str, object] = {
-        "util_files": util_files,
-        "summary": {
-            "wrapper_rate": round(wrapper_rate, 3),
-            "total_wrappers": total_wrappers,
-            "total_function_signatures": total_function_signatures,
-            "one_impl_interface_count": len(one_impl_interfaces),
-            "indirection_hotspot_count": len(indirection_hotspots),
-            "wide_param_bag_count": len(wide_param_bags),
-            "delegation_heavy_class_count": len(delegation_classes),
-            "facade_module_count": len(facade_modules),
-            "typed_dict_violation_count": total_typed_dict_violations,
-        },
-        "sub_axes": {
-            "abstraction_leverage": abstraction_leverage,
-            "indirection_cost": indirection_cost,
-            "interface_honesty": interface_honesty,
-            "delegation_density": delegation_density,
-            "definition_directness": definition_directness,
-            "type_discipline": type_discipline,
-        },
-    }
-    if wrappers_by_file:
-        context["pass_through_wrappers"] = wrappers_by_file[:20]
-    if one_impl_interfaces:
-        context["one_impl_interfaces"] = one_impl_interfaces[:20]
-    if indirection_hotspots:
-        context["indirection_hotspots"] = indirection_hotspots[:20]
-    if wide_param_bags:
-        context["wide_param_bags"] = wide_param_bags[:20]
-    if delegation_classes:
-        context["delegation_heavy_classes"] = delegation_classes
-    if facade_modules:
-        context["facade_modules"] = facade_modules
-    if typed_dict_violations:
-        context["typed_dict_violations"] = typed_dict_violations
-    return context
+    return _assemble_context(
+        util_files=util_files,
+        wrapper_rate=wrapper_rate,
+        total_wrappers=total_wrappers,
+        total_function_signatures=total_function_signatures,
+        wrappers_by_file=wrappers_by_file,
+        one_impl_interfaces=one_impl_interfaces,
+        indirection_hotspots=indirection_hotspots,
+        wide_param_bags=wide_param_bags,
+        delegation_classes=delegation_classes,
+        facade_modules=facade_modules,
+        typed_dict_violations=typed_dict_violations,
+        total_typed_dict_violations=total_typed_dict_violations,
+        sub_axes=sub_axes,
+    )
 
 
 def _codebase_stats(file_contents: dict[str, str]) -> dict[str, int]:

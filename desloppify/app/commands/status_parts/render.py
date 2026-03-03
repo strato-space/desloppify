@@ -2,293 +2,48 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-
-from desloppify import state as state_mod
-from desloppify.app.commands.helpers.query import write_query
 from desloppify.app.commands.helpers.rendering import print_agent_plan, print_ranked_actions
 from desloppify.app.commands.helpers.subjective import print_subjective_followup
 from desloppify.app.commands.scan import (
     scan_reporting_dimensions as reporting_dimensions_mod,
 )
-from desloppify.app.commands.scan.scan_reporting_presentation import dimension_bar
+from desloppify.app.commands.status_parts.render_dimensions import (
+    find_lowest_dimension as _find_lowest_dimension,
+    open_review_issue_counts as _open_review_issue_counts,
+    render_objective_dimensions as _render_objective_dimensions,
+    render_subjective_dimensions as _render_subjective_dimensions,
+    scorecard_subjective_entries_for_status as _scorecard_subjective_entries,
+)
+from desloppify.app.commands.status_parts.render_io import (
+    show_ignore_summary,
+    show_tier_progress_table,
+    write_status_query,
+)
+from desloppify.app.commands.status_parts.render_structural import (
+    build_area_rows as _build_area_rows,
+    collect_structural_areas as _collect_structural_areas,
+    render_area_workflow as _render_area_workflow,
+)
 from desloppify.app.commands.status_parts.summary import (
     print_open_scope_breakdown,
     print_scan_completeness,
     print_scan_metrics,
     score_summary_lines,
 )
-from desloppify.engine.planning.scorecard_projection import (
-    scorecard_subjective_entries,
-)
-from desloppify.core.paths_api import get_area
-from desloppify.core.registry import dimension_action_type
 from desloppify.scoring import (
     DIMENSIONS,
-    compute_health_breakdown,
     compute_score_impact,
     merge_potentials,
 )
 from desloppify.core.output_api import colorize, print_table
 
-
-def show_tier_progress_table(by_tier: dict) -> None:
-    """Fallback display when dimension scores are unavailable."""
-    rows = []
-    for tier_num in [1, 2, 3, 4]:
-        ts = by_tier.get(str(tier_num), {})
-        t_open = ts.get("open", 0)
-        t_fixed = ts.get("fixed", 0) + ts.get("auto_resolved", 0)
-        t_fp = ts.get("false_positive", 0)
-        t_wontfix = ts.get("wontfix", 0)
-        t_total = sum(ts.values())
-        strict_pct = round((t_fixed + t_fp) / t_total * 100) if t_total else 100
-        bar_len = 20
-        filled = round(strict_pct / 100 * bar_len)
-        bar = colorize("█" * filled, "green") + colorize(
-            "░" * (bar_len - filled), "dim"
-        )
-        rows.append(
-            [
-                f"Tier {tier_num}",
-                bar,
-                f"{strict_pct}%",
-                str(t_open),
-                str(t_fixed),
-                str(t_wontfix),
-            ]
-        )
-    print_table(
-        ["Tier", "Strict Progress", "%", "Open", "Fixed", "Debt"],
-        rows,
-        [40, 22, 5, 6, 6, 6],
-    )
-
-
-def _status_next_command(narrative: dict) -> str:
-    actions = narrative.get("actions", [])
-    return actions[0]["command"] if actions else "desloppify next --count 20"
-
-
-def write_status_query(
-    *,
-    state: dict,
-    stats: dict,
-    by_tier: dict,
-    dim_scores: dict,
-    scorecard_dims: list[dict],
-    subjective_measures: list[dict],
-    suppression: dict,
-    narrative: dict,
-    ignores: list[str],
-    overall_score: float | None,
-    objective_score: float | None,
-    strict_score: float | None,
-    verified_strict_score: float | None,
-    plan: dict | None = None,
-) -> None:
-    findings = state.get("findings", {})
-    open_scope = (
-        state_mod.open_scope_breakdown(findings, state.get("scan_path"))
-        if isinstance(findings, dict)
-        else None
-    )
-    write_query(
-        {
-            "command": "status",
-            "overall_score": overall_score,
-            "objective_score": objective_score,
-            "strict_score": strict_score,
-            "verified_strict_score": verified_strict_score,
-            "dimension_scores": dim_scores,
-            "scorecard_dimensions": scorecard_dims,
-            "subjective_measures": subjective_measures,
-            "stats": stats,
-            "scan_count": state.get("scan_count", 0),
-            "last_scan": state.get("last_scan"),
-            "by_tier": by_tier,
-            "ignores": ignores,
-            "suppression": suppression,
-            "potentials": state.get("potentials"),
-            "codebase_metrics": state.get("codebase_metrics"),
-            "open_scope": open_scope,
-            "score_breakdown": compute_health_breakdown(dim_scores) if dim_scores else None,
-            "next_command": _status_next_command(narrative),
-            "narrative": narrative,
-            **({"plan": {
-                "active": True,
-                "focus": plan.get("active_cluster"),
-                "total_ordered": len(plan.get("queue_order", [])),
-                "total_skipped": len(plan.get("skipped", {})),
-                "plan_overrides_narrative": True,
-            }} if plan and (plan.get("queue_order") or plan.get("clusters") or plan.get("skipped")) else {}),
-        }
-    )
-
-
-def show_ignore_summary(ignores: list[str], suppression: dict) -> None:
-    """Show ignore list plus suppression accountability from recent scans."""
-    print(colorize(f"\n  Ignore list ({len(ignores)}):", "dim"))
-    for p in ignores[:10]:
-        print(colorize(f"    {p}", "dim"))
-
-    last_ignored = int(suppression.get("last_ignored", 0) or 0)
-    last_raw = int(suppression.get("last_raw_findings", 0) or 0)
-    last_pct = float(suppression.get("last_suppressed_pct", 0.0) or 0.0)
-
-    if last_raw > 0:
-        style = "red" if last_pct >= 30 else "yellow" if last_pct >= 10 else "dim"
-        print(
-            colorize(
-                f"  Ignore suppression (last scan): {last_ignored}/{last_raw} findings hidden ({last_pct:.1f}%)",
-                style,
-            )
-        )
-    elif suppression.get("recent_scans", 0):
-        print(colorize("  Ignore suppression (last scan): 0 findings hidden", "dim"))
-
-    recent_scans = int(suppression.get("recent_scans", 0) or 0)
-    recent_raw = int(suppression.get("recent_raw_findings", 0) or 0)
-    if recent_scans > 1 and recent_raw > 0:
-        recent_ignored = int(suppression.get("recent_ignored", 0) or 0)
-        recent_pct = float(suppression.get("recent_suppressed_pct", 0.0) or 0.0)
-        print(
-            colorize(
-                f"    Recent ({recent_scans} scans): {recent_ignored}/{recent_raw} findings hidden ({recent_pct:.1f}%)",
-                "dim",
-            )
-        )
-
-
-def _scorecard_subjective_entries(state: dict, dim_scores: dict) -> list[dict]:
-    """Return subjective entries aligned to scorecard labels and ordering."""
-    return scorecard_subjective_entries(
-        state,
-        dim_scores=dim_scores,
-    )
-
-
-def _find_lowest_dimension(
-    dim_scores: dict,
+def _render_dimension_legend(
     scorecard_subjective: list[dict],
-) -> str | None:
-    """Return the name of the dimension with the lowest strict score."""
-    lowest_name = None
-    lowest_score = 101.0
-    for dim in DIMENSIONS:
-        ds = dim_scores.get(dim.name)
-        if not ds:
-            continue
-        strict_val = ds.get("strict", ds["score"])
-        if strict_val < lowest_score:
-            lowest_score = strict_val
-            lowest_name = dim.name
-    for entry in scorecard_subjective:
-        strict_val = float(entry.get("strict", entry.get("score", 100.0)))
-        if strict_val < lowest_score:
-            lowest_score = strict_val
-            lowest_name = entry.get("name")
-    return lowest_name
-
-
-def _open_review_issue_counts(state: dict) -> dict[str, int]:
-    """Count open review findings grouped by subjective dimension key."""
-    findings = state.get("findings", {})
-    if not isinstance(findings, dict):
-        return {}
-
-    counts: dict[str, int] = {}
-    for finding in findings.values():
-        if not isinstance(finding, dict):
-            continue
-        if finding.get("status") != "open" or finding.get("detector") != "review":
-            continue
-        detail = finding.get("detail", {})
-        dimension = ""
-        if isinstance(detail, dict):
-            dimension = str(detail.get("dimension", "")).strip()
-        if not dimension:
-            dimension = str(finding.get("dimension", "")).strip()
-        if not dimension:
-            continue
-        counts[dimension] = counts.get(dimension, 0) + 1
-    return counts
-
-
-def _render_objective_dimensions(
-    dim_scores: dict, *, lowest_name: str | None, bar_len: int
-) -> None:
-    """Print rows for objective (detector-based) dimensions."""
-    for dim in DIMENSIONS:
-        ds = dim_scores.get(dim.name)
-        if not ds:
-            continue
-        score_val = ds["score"]
-        strict_val = ds.get("strict", score_val)
-        checks = ds["checks"]
-
-        bar = dimension_bar(score_val, colorize_fn=colorize, bar_len=bar_len)
-
-        focus = colorize(" ←", "yellow") if dim.name == lowest_name else "  "
-        checks_str = f"{checks:>7,}"
-        action = dimension_action_type(dim.name)
-        print(
-            f"  {dim.name:<22} {checks_str}  {score_val:5.1f}%  {strict_val:5.1f}%  {bar}  T{dim.tier}  {action}{focus}"
-        )
-
-
-def _render_subjective_dimensions(
-    scorecard_subjective: list[dict],
+    state: dict | None = None,
     *,
-    lowest_name: str | None,
-    bar_len: int,
-    review_issue_counts: dict[str, int],
+    objective_backlog: int = 0,
 ) -> None:
-    """Print rows for subjective (review-based) dimensions."""
-    if not scorecard_subjective:
-        return
-    print(
-        colorize(
-            "  ── Subjective Measures (matches scorecard.png) ──────────────────────",
-            "dim",
-        )
-    )
-    for entry in scorecard_subjective:
-        name = str(entry.get("name", "Unknown"))
-        score_val = float(entry.get("score", 0.0))
-        strict_val = float(entry.get("strict", score_val))
-        tier = 4
-
-        bar = dimension_bar(score_val, colorize_fn=colorize, bar_len=bar_len)
-
-        focus = colorize(" ←", "yellow") if name == lowest_name else "  "
-        checks_str = f"{'—':>7}"
-        stale_tag = colorize(" [stale]", "yellow") if entry.get("stale") else ""
-        placeholder_tag = (
-            colorize(" [unassessed]", "yellow") if entry.get("placeholder") else ""
-        )
-        dim_key = str(entry.get("dimension_key", "")).strip()
-        cli_keys = [
-            str(key).strip()
-            for key in entry.get("cli_keys", [])
-            if isinstance(key, str) and str(key).strip()
-        ]
-        if dim_key:
-            issue_count = int(review_issue_counts.get(dim_key, 0))
-        elif cli_keys:
-            issue_count = int(sum(review_issue_counts.get(key, 0) for key in cli_keys))
-        else:
-            issue_count = 0
-        issue_style = "yellow" if strict_val < 95.0 and issue_count == 0 else "dim"
-        issue_tag = colorize(f" [open issues: {issue_count}]", issue_style)
-        print(
-            f"  {name:<22} {checks_str}  {score_val:5.1f}%  {strict_val:5.1f}%  {bar}  T{tier}  {'review'}{focus}{stale_tag}"
-            f"{placeholder_tag}{issue_tag}"
-        )
-
-
-def _render_dimension_legend(scorecard_subjective: list[dict], state: dict | None = None) -> None:
-    """Print the legend footer and stale-dimension re-review hint."""
+    """Print the legend footer and, when actionable, the stale rerun command."""
     print(
         colorize("  Health = open penalized | Strict = open + wontfix penalized", "dim")
     )
@@ -304,25 +59,24 @@ def _render_dimension_legend(scorecard_subjective: list[dict], state: dict | Non
         if e.get("stale") and e.get("dimension_key")
     ]
     if stale_keys:
-        n = len(stale_keys)
-        dims_arg = ",".join(stale_keys)
         print(
-            colorize(
-                f"  [stale] = subjective assessment outdated, not an unresolved finding"
-                f" — re-review to refresh",
-                "yellow",
-            )
+            colorize("  [stale] = assessment outdated", "yellow")
         )
-        print(
-            colorize(
-                f"  {n} stale dimension{'s' if n != 1 else ''}"
-                f": `desloppify review --prepare --dimensions {dims_arg} --force-review-rerun`",
-                "yellow",
+        if objective_backlog <= 0:
+            n = len(stale_keys)
+            dims_arg = ",".join(stale_keys)
+            print(
+                colorize(
+                    f"  {n} stale dimension{'s' if n != 1 else ''}"
+                    f": `desloppify review --prepare --dimensions {dims_arg} --force-review-rerun`",
+                    "yellow",
+                )
             )
-        )
 
 
-def show_dimension_table(state: dict, dim_scores: dict) -> None:
+def show_dimension_table(
+    state: dict, dim_scores: dict, *, objective_backlog: int = 0,
+) -> None:
     """Show dimension health table with dual scores and progress bars."""
     print()
     bar_len = 20
@@ -345,7 +99,7 @@ def show_dimension_table(state: dict, dim_scores: dict) -> None:
         bar_len=bar_len,
         review_issue_counts=review_issue_counts,
     )
-    _render_dimension_legend(scorecard_subjective, state=state)
+    _render_dimension_legend(scorecard_subjective, state=state, objective_backlog=objective_backlog)
     print()
 
 
@@ -439,7 +193,11 @@ def show_focus_suggestion(
 
 
 def show_subjective_followup(
-    state: dict, dim_scores: dict, *, target_strict_score: float
+    state: dict,
+    dim_scores: dict,
+    *,
+    target_strict_score: float,
+    objective_backlog: int = 0,
 ) -> None:
     """Show concrete subjective follow-up commands when applicable."""
     if not dim_scores:
@@ -456,7 +214,7 @@ def show_subjective_followup(
         max_quality_items=3,
         max_integrity_items=5,
     )
-    if print_subjective_followup(followup):
+    if print_subjective_followup(followup, objective_backlog=objective_backlog):
         print()
 
 
@@ -488,78 +246,6 @@ def show_agent_plan(narrative: dict, *, plan: dict | None = None) -> None:
 
     if print_ranked_actions(actions):
         print()
-
-
-def _collect_structural_areas(
-    state: dict,
-) -> list[tuple[str, list]] | None:
-    """Collect T3/T4 structural findings grouped by area.
-
-    Returns sorted area list, or None if insufficient data to display.
-    """
-    findings = state_mod.path_scoped_findings(
-        state.get("findings", {}), state.get("scan_path")
-    )
-
-    structural = [
-        f
-        for f in findings.values()
-        if f["tier"] in (3, 4) and f["status"] in ("open", "wontfix")
-    ]
-
-    if len(structural) < 5:
-        return None
-
-    areas: dict[str, list] = defaultdict(list)
-    for f in structural:
-        area = get_area(str(f.get("file", "")))
-        areas[area].append(f)
-
-    if len(areas) < 2:
-        return None
-
-    return sorted(areas.items(), key=lambda x: -sum(f["tier"] for f in x[1]))
-
-
-def _build_area_rows(sorted_areas: list[tuple[str, list]], *, max_areas: int = 15) -> list[list[str]]:
-    """Build table rows from sorted area findings."""
-    rows = []
-    for area, area_findings in sorted_areas[:max_areas]:
-        t3 = sum(1 for f in area_findings if f["tier"] == 3)
-        t4 = sum(1 for f in area_findings if f["tier"] == 4)
-        open_count = sum(1 for f in area_findings if f["status"] == "open")
-        debt_count = sum(1 for f in area_findings if f["status"] == "wontfix")
-        weight = sum(f["tier"] for f in area_findings)
-        rows.append(
-            [
-                area,
-                str(len(area_findings)),
-                f"T3:{t3} T4:{t4}",
-                str(open_count),
-                str(debt_count),
-                str(weight),
-            ]
-        )
-    return rows
-
-
-def _render_area_workflow(sorted_areas: list[tuple[str, list]], *, max_areas: int = 15) -> None:
-    """Print the overflow count and workflow instructions."""
-    remaining = len(sorted_areas) - max_areas
-    if remaining > 0:
-        print(colorize(f"\n  ... and {remaining} more areas", "dim"))
-
-    print(colorize("\n  Workflow:", "dim"))
-    print(colorize("    1. desloppify show <area> --status wontfix --top 50", "dim"))
-    print(
-        colorize(
-            "    2. Create tasks/<date>-<area-name>.md with decomposition plan", "dim"
-        )
-    )
-    print(
-        colorize("    3. Farm each task doc to a sub-agent for implementation", "dim")
-    )
-    print()
 
 
 def show_structural_areas(state: dict):
