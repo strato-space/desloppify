@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from desloppify.base.discovery.paths import get_project_root
 from desloppify.engine.policy.zones import Zone
 from desloppify.languages.python.detectors import bandit_adapter as adapter_mod
 
@@ -57,9 +58,7 @@ def test_to_security_entry_keeps_production_zone():
 
 def test_to_security_entry_normalizes_absolute_paths_before_zone_lookup():
     result = _sample_result()
-    result["filename"] = (
-        "/Users/peteromalley/Documents/desloppify/desloppify/tests/test_file.py"
-    )
+    result["filename"] = str(get_project_root() / "desloppify/tests/test_file.py")
     entry = adapter_mod._to_security_entry(result, _RelOnlyZoneMap())
     assert entry is None
 
