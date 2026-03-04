@@ -876,12 +876,9 @@ def test_collapse_clusters_preserves_order():
 
 
 def test_plan_ordered_stale_subjective_surfaces_with_objective_backlog():
-    """Stale subjective items in plan queue_order surface even with objective backlog.
-
-    After a completed cycle, stale dims are injected into queue_order by
-    sync_stale_dimensions.  The work queue must respect the plan's explicit
-    ordering and surface them even though should_surface() would normally
-    filter them.
+    """Subjective items never surface while objective issues exist,
+    even when the plan explicitly includes them in queue_order.
+    They wait until the objective queue is fully drained.
     """
     from desloppify.engine._plan.schema import empty_plan
 
@@ -910,14 +907,14 @@ def test_plan_ordered_stale_subjective_surfaces_with_objective_backlog():
         }
     }
 
-    # Without plan: stale subjective item is gated (existing behavior)
+    # Without plan: stale subjective item is gated
     queue_no_plan = build_work_queue(state, count=None, include_subjective=True)
     subj_no_plan = [
         i["id"] for i in queue_no_plan["items"] if i["id"].startswith("subjective::")
     ]
     assert len(subj_no_plan) == 0
 
-    # With plan that includes the stale dim in queue_order: surfaces
+    # With plan that includes the stale dim in queue_order: still gated
     plan = empty_plan()
     plan["queue_order"] = [
         "subjective::naming_quality",
@@ -932,11 +929,8 @@ def test_plan_ordered_stale_subjective_surfaces_with_objective_backlog():
     subj_with_plan = [
         i["id"] for i in queue_with_plan["items"] if i["id"].startswith("subjective::")
     ]
-    assert len(subj_with_plan) == 1
-    assert "subjective::naming_quality" in subj_with_plan
-
-    # And it should be first in the queue (plan order respected)
-    assert queue_with_plan["items"][0]["id"] == "subjective::naming_quality"
+    # Subjective items always wait for objective drain, even with plan override
+    assert len(subj_with_plan) == 0
 
 
 # ── Wontfix / resolved issues excluded (#193) ──────────

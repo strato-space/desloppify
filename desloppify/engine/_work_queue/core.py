@@ -206,22 +206,22 @@ def _gather_subjective_items(
         else set()
     )
 
-    # Subjective items only surface when the objective queue is drained,
-    # unless the plan explicitly orders them.  Review issues for each
-    # dimension are already separate queue items.
+    # Subjective items only surface when the objective queue is drained.
+    # Review issues for each dimension are already separate queue items —
+    # the subjective meta-item adds no value while there's mechanical work.
     issues = state.get("issues", {})
     open_objective_count = sum(
         1 for iss in issues.values()
         if iss.get("status") == "open" and iss.get("detector") != "review"
     )
+    if open_objective_count > 0:
+        return []
 
     result: list[WorkQueueItem] = []
     for item in candidates:
         if not scope_matches(item, opts.scope):
             continue
         item_id = item.get("id", "")
-        if open_objective_count > 0 and item_id not in plan_queue_set:
-            continue
         if not policy.should_surface(item) and item_id not in plan_queue_set:
             continue
         result.append(item)
