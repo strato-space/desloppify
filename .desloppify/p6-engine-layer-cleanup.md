@@ -1,5 +1,7 @@
 # P6: Engine Layer Cleanup — Circular Dependency Fix + Orchestration Splits
 
+**Branch**: `v0.9.0` — all changes must be made on this branch. **Depends on P3** (both touch `engine/_scoring/` and `engine/_state/scoring.py`). Wait for P3 to complete first.
+
 **Effort**: Medium-large (4-6 hours)
 **Risk**: Medium — moving scoring logic between modules, splitting state machine files
 **Files touched**: `engine/_state/scoring.py`, `engine/_scoring/` (new file), `app/commands/scan/workflow.py`, `engine/_plan/stale_dimensions.py`, `engine/_plan/auto_cluster.py`

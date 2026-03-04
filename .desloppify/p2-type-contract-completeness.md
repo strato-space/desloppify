@@ -1,5 +1,7 @@
 # P2: Type Contract Completeness
 
+**Branch**: `v0.9.0` — all changes must be made on this branch.
+
 **Effort**: Medium (3-5 hours total)
 **Risk**: Very low — pure type annotations, zero runtime behavior changes
 **Files touched**: `engine/_state/schema.py`, `engine/_plan/schema.py`, `engine/_work_queue/*.py`, `intelligence/narrative/core.py`

@@ -1,5 +1,7 @@
 # P5: Module Decomposition — Split Oversized Command Modules
 
+**Branch**: `v0.9.0` — all changes must be made on this branch.
+
 **Effort**: Large (4-6 hours)
 **Risk**: Medium — structural changes to large files, but localized to specific command packages
 **Files touched**: `app/commands/plan/triage/stages.py`, `app/commands/review/runner_process.py`, `app/commands/review/runner_parallel.py`

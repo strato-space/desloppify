@@ -1,5 +1,7 @@
 # P1: Quick Safety & Correctness Wins
 
+**Branch**: `v0.9.0` — all changes must be made on this branch.
+
 **Effort**: Small (1-2 hours total)
 **Risk**: Very low — mechanical fixes, no behavioral changes except persistence signaling
 **Files touched**: `app/commands/registry.py`, `engine/_state/persistence.py`, `engine/detectors/jscpd_adapter.py`, plus 3-5 files with assert replacements

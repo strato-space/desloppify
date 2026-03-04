@@ -1,5 +1,7 @@
 # P7: Language Layer Cleanup — Tree-Sitter Decomposition + Language Config Splits
 
+**Branch**: `v0.9.0` — all changes must be made on this branch.
+
 **Effort**: Large (5-7 hours)
 **Risk**: Medium — structural changes to the language framework and plugin assembly modules
 **Files touched**: `languages/_framework/treesitter/_imports.py`, `languages/typescript/__init__.py`, `languages/python/__init__.py`, and potentially other large language `__init__.py` files

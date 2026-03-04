@@ -1,5 +1,7 @@
 # P8: Typed Contracts, Data-Driven Concerns, Command Options, and Naming
 
+**Branch**: `v0.9.0` — all changes must be made on this branch.
+
 **Effort**: Medium (4-5 hours)
 **Risk**: Low-medium — mostly type annotations, data restructuring, and renaming
 **Files touched**: `app/commands/review/batch/core.py`, `engine/_plan/stale_dimensions.py`, `engine/concerns.py`, `app/commands/review/cmd.py`, `app/commands/scan/cmd.py`, `app/commands/show/cmd.py`, `base/text_utils.py`

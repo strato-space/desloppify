@@ -1,5 +1,7 @@
 # P3: Detector Config Centralization & Private Import Cleanup
 
+**Branch**: `v0.9.0` — all changes must be made on this branch. **Depends on P1** (both touch `engine/_state/scoring.py`). Wait for P1 to complete first.
+
 **Effort**: Medium (3-4 hours total)
 **Risk**: Low-medium — changes registry data structure and import paths
 **Files touched**: `base/registry.py`, `engine/_scoring/policy/core.py`, `engine/_state/merge.py`, `state.py`, `app/cli_support/parser.py`, scattered importers

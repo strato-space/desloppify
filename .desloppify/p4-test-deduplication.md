@@ -1,5 +1,7 @@
 # P4: Review Test Suite Deduplication
 
+**Branch**: `v0.9.0` — all changes must be made on this branch.
+
 **Effort**: Medium (2-3 hours)
 **Risk**: Low — test-only changes, no production code modified
 **Files touched**: `tests/review/` and `tests/review/integration/` (test files only)
