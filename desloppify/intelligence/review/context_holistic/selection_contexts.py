@@ -31,7 +31,7 @@ from desloppify.intelligence.review.context import file_excerpt, importer_count
 logger = logging.getLogger(__name__)
 
 
-def architecture_context(lang, file_contents: dict[str, str]) -> dict[str, Any]:
+def architecture_context(lang: object, file_contents: dict[str, str]) -> dict[str, Any]:
     arch: dict[str, Any] = {}
     if not lang.dep_graph:
         return arch
@@ -230,7 +230,7 @@ def dependencies_context(
 
 
 def testing_context(
-    lang,
+    lang: object,
     state: StateModel,
     file_contents: dict[str, str],
     *,
@@ -265,7 +265,7 @@ def testing_context(
     return testing
 
 
-def api_surface_context(lang, file_contents: dict[str, str]) -> dict[str, Any]:
+def api_surface_context(lang: object, file_contents: dict[str, str]) -> dict[str, Any]:
     api_surface_fn = getattr(lang, "review_api_surface_fn", None)
     if not callable(api_surface_fn):
         return {}

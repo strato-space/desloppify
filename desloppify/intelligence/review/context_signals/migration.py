@@ -47,7 +47,7 @@ def gather_migration_signals_by_config(
 
 def gather_migration_signals(
     file_contents: dict[str, str],
-    lang,
+    lang: str | MigrationLangConfig,
     *,
     rel_fn: Callable[[str], str],
 ) -> dict[str, object]:

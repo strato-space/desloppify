@@ -12,7 +12,7 @@ from desloppify.intelligence.review._context.models import ReviewContext
 
 def build_review_context_inner(
     files: list[str],
-    lang,
+    lang: object,
     state: StateModel,
     ctx: ReviewContext,
     *,

@@ -76,7 +76,7 @@ def importer_count(entry: dict[str, Any]) -> int:
 
 def build_review_context(
     path: Path,
-    lang,
+    lang: object,
     state: StateModel,
     files: list[str] | None = None,
 ) -> ReviewContext:

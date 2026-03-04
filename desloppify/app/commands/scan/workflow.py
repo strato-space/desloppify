@@ -270,7 +270,7 @@ def _expire_provisional_manual_override_assessments(
     return expired
 
 
-def prepare_scan_runtime(args) -> ScanRuntime:
+def prepare_scan_runtime(args: argparse.Namespace) -> ScanRuntime:
     """Resolve state/config/language and apply scan-time runtime settings."""
     runtime = command_runtime(args)
     state_file = runtime.state_path

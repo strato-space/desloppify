@@ -170,7 +170,7 @@ def _detector_names_hint() -> str:
     return "smells, structural, security, review, ..."
 
 
-def resolve_show_scope(args) -> tuple[bool, str | None, str, str | None]:
+def resolve_show_scope(args: object) -> tuple[bool, str | None, str, str | None]:
     """Resolve scope/pattern/status for a show invocation."""
     chronic = getattr(args, "chronic", False)
     pattern = args.pattern

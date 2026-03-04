@@ -46,7 +46,7 @@ class BatchRunPolicy:
         return max(1, math.ceil((waves * self.batch_timeout_seconds) / 60))
 
 
-def resolve_batch_run_policy(args) -> BatchRunPolicy:
+def resolve_batch_run_policy(args: object) -> BatchRunPolicy:
     """Build one canonical policy object from CLI args."""
     return BatchRunPolicy(
         run_parallel=bool(getattr(args, "parallel", False)),

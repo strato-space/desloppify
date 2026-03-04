@@ -82,7 +82,7 @@ class HolisticReviewPrepareOptions:
     issue_history_max_issues: int = 30
     issue_history_max_batch_items: int = 20
 
-def _rel_list(s) -> list[str]:
+def _rel_list(s: set[str] | list[str]) -> list[str]:
     """Normalize a set or list of paths to sorted relative paths (max 10)."""
     if isinstance(s, set):
         return sorted(rel(x) for x in s)[:10]
@@ -180,7 +180,7 @@ def prepare_review(
     }
 
 
-def _build_file_requests(files: list[str], lang, state: dict) -> list[dict]:
+def _build_file_requests(files: list[str], lang: object, state: dict) -> list[dict]:
     """Build per-file review request dicts."""
     file_requests = []
     for filepath in files:

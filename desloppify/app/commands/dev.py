@@ -130,7 +130,7 @@ def _wire_pyproject(lang_name: str) -> bool:
     return False
 
 
-def _cmd_scaffold_lang(args) -> None:
+def _cmd_scaffold_lang(args: object) -> None:
     raw_name = getattr(args, "name", "")
     lang_name = _normalize_lang_name(raw_name)
     extensions = _normalize_extensions(getattr(args, "extension", None))

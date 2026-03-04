@@ -53,7 +53,7 @@ def build_holistic_context(
 
 def build_holistic_context_model(
     path: Path,
-    lang,
+    lang: object,
     state: dict,
     files: list[str] | None = None,
 ) -> HolisticContext:
@@ -71,7 +71,7 @@ def build_holistic_context_model(
 
 
 def _build_holistic_context_inner(
-    path: Path, files: list[str], lang, state: dict
+    path: Path, files: list[str], lang: object, state: dict
 ) -> HolisticContext:
     """Inner holistic context builder (runs with file cache enabled)."""
     file_contents = _read_file_contents(files)

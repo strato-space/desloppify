@@ -15,7 +15,7 @@ from desloppify.engine.plan import load_plan, save_plan
 _logger = logging.getLogger(__name__)
 
 
-def scan_queue_preflight(args) -> None:
+def scan_queue_preflight(args: object) -> None:
     """Warn and gate scan when queue has unfinished items."""
     # CI profile always passes
     if getattr(args, "profile", None) == "ci":

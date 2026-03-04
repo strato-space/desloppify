@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from functools import lru_cache
-
+import argparse
 from desloppify.app.cli_support.parser import create_parser as _create_parser
 from desloppify.app.commands.helpers.lang import LangResolutionError, resolve_lang
 from desloppify.app.commands.helpers.runtime import CommandRuntime
@@ -94,7 +94,7 @@ def _apply_persisted_exclusions(args, config: dict):
     )
 
 
-def _resolve_default_path(args) -> None:
+def _resolve_default_path(args: argparse.Namespace) -> None:
     """Fill args.path from detected language or default source path.
 
     For the review command, the last scan path (stored in state) is used as the
@@ -122,7 +122,7 @@ def _resolve_default_path(args) -> None:
         args.path = str(get_default_path())
 
 
-def _load_shared_runtime(args) -> None:
+def _load_shared_runtime(args: argparse.Namespace) -> None:
     """Load config/state and attach shared objects to parsed args."""
     config = load_config()
 

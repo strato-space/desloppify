@@ -71,7 +71,7 @@ def _lang_config_markers() -> tuple[str, ...]:
 
 
 def resolve_detection_root(
-    args,
+    args: object,
     *,
     project_root: Path | None = None,
     marker_provider: Callable[[], tuple[str, ...]] | None = None,
@@ -97,7 +97,7 @@ def resolve_detection_root(
     return search_root
 
 
-def auto_detect_lang_name(args) -> str | None:
+def auto_detect_lang_name(args: object) -> str | None:
     """Auto-detect language using the most relevant root for this command."""
     root = resolve_detection_root(args)
     detected = lang_api.auto_detect_lang(root)
@@ -106,7 +106,7 @@ def auto_detect_lang_name(args) -> str | None:
     return detected
 
 
-def resolve_lang(args) -> LangConfig | None:
+def resolve_lang(args: object) -> LangConfig | None:
     """Resolve language config from args, with auto-detection fallback."""
     lang_name = getattr(args, "lang", None)
     if lang_name is None:
